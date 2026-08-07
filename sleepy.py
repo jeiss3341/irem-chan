@@ -19,6 +19,44 @@ NAP_MAX_MINUTES = 90
 WOKEN_MIN_MINUTES = 5
 WOKEN_MAX_MINUTES = 25
 
+# Cute random statuses she shows while awake. Add or remove freely.
+AWAKE_STATUSES = [
+    "playing~ nya",
+    "looking for fish",
+    "meow meow",
+    "waiting for friends",
+    "chasing butterflies",
+    "counting little fishies",
+    "making a gift for you",
+    "napping in a sunbeam",
+    "collecting shiny shells",
+    "found a four-leaf clover!",
+    "thinking about snacks",
+    "practicing my fishing",
+    "who wants to play?",
+    "guarding my treasures",
+    "wishing on a star",
+    "chasing my own tail",
+    "picking pretty flowers",
+    "waiting by the pond",
+    "purring softly~",
+    "looking for the biggest fish",
+    "daydreaming about tuna",
+    "batting at a yarn ball",
+    "sunbathing by the window",
+    "sniffing the sea breeze",
+    "saving a snack for you",
+    "watching the clouds go by",
+    "hunting for four-leaf clovers",
+    "listening to the waves",
+    "hoping a friend visits",
+    "keeping a wish safe for you",
+]
+
+
+def pick_awake_status():
+    return random.choice(AWAKE_STATUSES)
+
 
 def seconds_until(hour, minute=0):
     """Seconds from now until the next time it is hour:minute locally."""
@@ -76,7 +114,7 @@ class SleepCycle:
             drowsy_at = max(0, bedtime - DROWSY_LEAD_HOURS * 3600)
 
             # ----- AWAKE (with a possible daytime nap) -----
-            await self._set("awake", discord.Status.online, "playing~ nya")
+            await self._set("awake", discord.Status.online, pick_awake_status())
 
             if random.random() < NAP_CHANCE and drowsy_at > 3600:
                 await asyncio.sleep(random.uniform(0.3, 0.7) * drowsy_at)
@@ -84,7 +122,7 @@ class SleepCycle:
                 await self._set("asleep", discord.Status.invisible)
                 nap_total = random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60
                 await self._sleep_wakeable(nap_total)   # nap is wakeable too
-                await self._set("awake", discord.Status.online, "back from a nap~")
+                await self._set("awake", discord.Status.online, pick_awake_status())
                 drowsy_at = max(0, seconds_until(NIGHT_SLEEP_START)
                                 - DROWSY_LEAD_HOURS * 3600 + jitter * 60)
 
