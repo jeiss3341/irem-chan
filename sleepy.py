@@ -15,6 +15,10 @@ NAP_CHANCE      = 0.4     # chance she takes one daytime nap (0.4 = 40%)
 NAP_MIN_MINUTES = 30
 NAP_MAX_MINUTES = 90
 
+# If woken during a sleep (nap or night), she stays up this long (random), then dozes off
+WOKEN_MIN_MINUTES = 5
+WOKEN_MAX_MINUTES = 25
+
 
 def seconds_until(hour, minute=0):
     """Seconds from now until the next time it is hour:minute locally."""
@@ -44,6 +48,24 @@ class SleepCycle:
         else:
             await self.client.change_presence(status=status)
 
+    async def _sleep_wakeable(self, total_seconds):
+        """Sleep for total_seconds, but if a poke sets her 'awake', let her be up
+        a random short while, then doze off again, until the time is used up."""
+        slept = 0
+        while slept < total_seconds:
+            await asyncio.sleep(20)
+            slept += 20
+            if self.state == "awake":
+                up_for = random.randint(WOKEN_MIN_MINUTES, WOKEN_MAX_MINUTES) * 60
+                up_slept = 0
+                while up_slept < up_for and self.state == "awake":
+                    await asyncio.sleep(20)
+                    up_slept += 20
+                slept += up_slept
+                if slept < total_seconds:
+                    self.poke_counts.clear()
+                    await self._set("asleep", discord.Status.invisible)
+
     async def run(self):
         await self.client.wait_until_ready()
         while not self.client.is_closed():
@@ -60,7 +82,8 @@ class SleepCycle:
                 await asyncio.sleep(random.uniform(0.3, 0.7) * drowsy_at)
                 self.poke_counts.clear()
                 await self._set("asleep", discord.Status.invisible)
-                await asyncio.sleep(random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60)
+                nap_total = random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60
+                await self._sleep_wakeable(nap_total)   # nap is wakeable too
                 await self._set("awake", discord.Status.online, "back from a nap~")
                 drowsy_at = max(0, seconds_until(NIGHT_SLEEP_START)
                                 - DROWSY_LEAD_HOURS * 3600 + jitter * 60)
@@ -71,8 +94,9 @@ class SleepCycle:
             await self._set("drowsy", discord.Status.idle, "getting sleepy...")
             await asyncio.sleep(DROWSY_LEAD_HOURS * 3600)
 
-            # ----- NIGHT SLEEP -----
+            # ----- NIGHT SLEEP (wakeable) -----
             self.poke_counts.clear()
             await self._set("asleep", discord.Status.invisible)
-            await asyncio.sleep(max(3600, NIGHT_SLEEP_HOURS * 3600 + jitter * 60))
-            # loop back to awake for the new day
+            night_total = int(max(3600, NIGHT_SLEEP_HOURS * 3600 + jitter * 60))
+            await self._sleep_wakeable(night_total)
+            # morning: loop back to awake for the new day
