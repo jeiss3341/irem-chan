@@ -21,7 +21,7 @@ WOKEN_MIN_MINUTES = 5
 WOKEN_MAX_MINUTES = 25
 
 # How often her awake status reshuffles on its own (random, in this range)
-STATUS_SHUFFLE_MIN_HOURS = 3
+STATUS_SHUFFLE_MIN_HOURS = 1
 STATUS_SHUFFLE_MAX_HOURS = 6
 
 # Cute random statuses she shows while awake. Add or remove freely.
