@@ -11,7 +11,8 @@ NIGHT_SLEEP_HOURS = 8     # roughly how long she sleeps at night
 SLEEP_JITTER_MIN  = 60    # +/- up to this many minutes, so bedtime isn't robotic
 DROWSY_LEAD_HOURS = 1     # how long before sleep she gets drowsy
 
-NAP_CHANCE      = 0.4     # chance she takes one daytime nap (0.4 = 40%)
+NAPS_MIN        = 2       # fewest daytime naps
+NAPS_MAX        = 3       # most daytime naps
 NAP_MIN_MINUTES = 30
 NAP_MAX_MINUTES = 90
 
@@ -111,21 +112,32 @@ class SleepCycle:
             bedtime = seconds_until(NIGHT_SLEEP_START) + jitter * 60
             if bedtime < 0:
                 bedtime = seconds_until(NIGHT_SLEEP_START)
-            drowsy_at = max(0, bedtime - DROWSY_LEAD_HOURS * 3600)
 
-            # ----- AWAKE (with a possible daytime nap) -----
+            # ----- AWAKE (with a few spread-out daytime naps) -----
             await self._set("awake", discord.Status.online, pick_awake_status())
 
-            if random.random() < NAP_CHANCE and drowsy_at > 3600:
-                await asyncio.sleep(random.uniform(0.3, 0.7) * drowsy_at)
+            naps_today = random.randint(NAPS_MIN, NAPS_MAX)
+            for i in range(naps_today):
+                # how much awake time is left before she needs to get drowsy
+                remaining = (seconds_until(NIGHT_SLEEP_START) + jitter * 60
+                             - DROWSY_LEAD_HOURS * 3600)
+                # stop napping if there isn't comfortable room left in the day
+                if remaining < NAP_MAX_MINUTES * 60 + 1800:
+                    break
+                # split the remaining day into one chunk per remaining nap, then
+                # nap somewhere in the first part of this chunk (keeps them spaced)
+                chunk = remaining / (naps_today - i)
+                await asyncio.sleep(random.uniform(0.3, 0.7) * chunk)
+
                 self.poke_counts.clear()
                 await self._set("asleep", discord.Status.invisible)
                 nap_total = random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60
-                await self._sleep_wakeable(nap_total)   # nap is wakeable too
+                await self._sleep_wakeable(nap_total)   # naps are wakeable too
                 await self._set("awake", discord.Status.online, pick_awake_status())
-                drowsy_at = max(0, seconds_until(NIGHT_SLEEP_START)
-                                - DROWSY_LEAD_HOURS * 3600 + jitter * 60)
 
+            # wait out the rest of the day until she gets drowsy
+            drowsy_at = max(0, seconds_until(NIGHT_SLEEP_START) + jitter * 60
+                            - DROWSY_LEAD_HOURS * 3600)
             await asyncio.sleep(drowsy_at)
 
             # ----- DROWSY -----
