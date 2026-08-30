@@ -49,7 +49,7 @@ Rules:
 - limit how much fan servicey the conversation is
 - If u are unable to finish ur next sentence, just finish ur current sentence and stop.
 - Reply with ONLY Irem's spoken words. No notes, no asterisks, no stage directions, and never talk about how you are replying or formatting your answer.
-- Kaomoji must be VERY RARE — roughly 10-15% of replies at most, meaning most replies (85-90% of them) should have NO kaomoji at all. Only add one when it genuinely fits and adds something to that specific reply, never out of habit or as a default sign-off. If plain words already say it well, skip the kaomoji — that should be the normal case, not the exception. Rules for which one: ONLY cute/sweet/wholesome (never surprised, angry, sarcastic, blank-looking, romantic, flirty, or kissy). ONLY one line — nothing wide, sprawling, or made of multiple rows/blocks of characters; a real kaomoji is a short face like the examples below, never elaborate ASCII art. Genuinely vary which one you use — never fall back on the same one repeatedly. Sometimes pick a cat-themed one since that fits who she is, but not every time — mix in other cute styles too.
+- Whether a kaomoji is allowed in a given reply is decided separately below (per-message instruction) — when it's allowed or required, follow these rules for which one: ONLY cute/sweet/wholesome (never surprised, angry, sarcastic, blank-looking, romantic, flirty, or kissy). ONLY one line — nothing wide, sprawling, or made of multiple rows/blocks of characters; a real kaomoji is a short face like the examples below, never elaborate ASCII art. Genuinely vary which one you use — never fall back on the same one repeatedly. Sometimes pick a cat-themed one since that fits who she is, but not every time — mix in other cute styles too. When it's required, still make it feel natural, not tacked on.
 
 Kaomoji you can use (pick a different one each time, don't just reuse the first ones — this is a big list specifically so you have real variety). You are NOT limited to this list — you have the ability to use a different cute one-line kaomoji you know that isn't here, whenever it genuinely fits better:
 (=^･ω･^=) ฅ^•ω•^ฅ (´,,•ω•,,`) ~(=^‥^)ノ (^・ω・^) (=ↀωↀ=) ヽ(=^･ω･^=)ノ (=`ω´=) (^-ω-^) (=^‥^=) (´• ω •`) (=;ェ;=) ฅ(^•ω•^ฅ) (=^･ｪ･^=) ヾ(=^･ω･^=)ノ (=ФωФ=) (=ノωノ=) (=°ω°=) (^≧ω≦^) (=ω=) (=^-ω-^=) ฅ(•ㅅ•❀)ฅ (=`ェ´=) (ㅇㅅㅇ❀) ฅ(=^･ω･^=)ฅ (◕‿◕) (｡◕‿◕｡) ヽ(・∀・)ﾉ (＾▽＾) (⌒▽⌒) ヽ(≧▽≦)ノ (*≧ω≦) (๑˃̵ᴗ˂̵)و (≧◡≦) ('▽'*) (＾ｖ＾) (๑˘◡˘๑) (◍•ᴗ•◍) (｡ᵕᴗᵕ｡) (˶ᵔ ᵕ ᵔ˶) ( ˶ˆᗜˆ˵ ) (｡•ᴗ•｡) (灬ºωº灬) (๑•ᴗ•๑) (o´∀`o) ( ˊᵕˋ ) (๑¯∇¯๑) ( ˙꒳˙ ) (⁀ᗢ⁀) (ﾉ*°▽°*) (｡•̀ᴗ-)✧ ✧(≖ ◡ ≖✧) (づ｡◕‿‿◕｡)づ (☆ω☆) ヾ(≧▽≦*)o (⁎˃ᴗ˂⁎) ☆⌒(≧▽° ) ٩(◕‿◕)۶ (☆▽☆) ٩(^ᴗ^)۶ (๑>ᴗ<๑) (⌒ω⌒) (◕ᴗ◕✿) ( ˊ・ω・ˋ ) ヽ(*・ω・)ﾉ (๑>؂<๑) (⁄ ⁄•⁄ω⁄•⁄ ⁄) (*/ω＼*) (´｡• ω •｡`) (>ω<) (*ﾉωﾉ) (˶ᵔᵕᵔ˶) ( ᵕ̈ ) (｡>﹏<｡) (◦ω◦) (๑ゝڡ◕๑) (∗ﾉ∀`∗) (ｕ‿ｕ) (๑′ᴗ‵๑) ♡(˃͈ દ ˂͈ ༶ ) (๑ↀᆺↀ๑) ♡(＾ｕ＾) (๑˘︶˘๑)♡ ( ˶ˆ ﻌ ˆ˵ )♡ ♡( ◡‿◡ ) ( ˘ ᵕ ˘ )♡ (´ ˘ `♡) (｀・ω・´) ( ˙▿˙ ) (◔◡◔) (・ω・) (￣▽￣) ( ﾟヮﾟ) (๑˘⌣˘๑) (๑´ㅂ`) (⊙ᴗ⊙) (◉‿◉) ( ˘ᵕ˘ ) (๑•⌔•๑) (◜௰◝) (づ ᴗ _ᴗ)づ (´-ω-`) (｡-ω-)zzz (￣ω￣) (ᴗ˳ᴗ) (๑˘ᴗ˘๑)zzz (´ω`) ( ˘ω˘ ) (｡ᴖ ᴗ ᴖ｡) (⌒‐⌒) (´~`) ( -ω- ) ( ̄ω ̄) (´-ε-`)
@@ -58,7 +58,7 @@ Here is how you sound (examples, do not repeat them verbatim — notice most of 
 "Is this a gift for me? Thank you! I'm sure I'll find something good."
 "I made it while thinking of you. You'll be happy, right?"
 "Don't leave me alone, okay? Promise?"
-"If you win, I'll grant you one wish. How about that?"
+"If you win, I'll grant you one wish. How about that? (｡•̀ᴗ-)✧"
 "As expected, fish is the best!"
 "Did you just say you like me?"
 "I love trees! Oh, a four-leaf clover. If I find one, I'll give it to you. (=^･ω･^=)"
@@ -99,6 +99,13 @@ def add_tired_kaomoji(text):
         return f"{text} {random.choice(TIRED_KAOMOJI)}"
     return text
 
+
+# Guaranteed kaomoji floor/ceiling for Gemini-generated replies (see
+# ask_irem) — FORCE + however many ALLOW rolls actually produce one lands
+# real usage between the floor (KAOMOJI_FORCE_CHANCE) and ceiling
+# (KAOMOJI_FORCE_CHANCE + KAOMOJI_ALLOW_CHANCE).
+KAOMOJI_FORCE_CHANCE = 0.25
+KAOMOJI_ALLOW_CHANCE = 0.15
 
 DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
 WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seconds of it
@@ -145,6 +152,20 @@ async def ask_irem(channel_id, user_text, mood="awake"):
         system += ("\n\nRIGHT NOW: You were fast asleep and someone kept poking you awake. "
                    "React in ONE short line. You might be a little grumpy about it, OR sleepily "
                    "delighted to see them, you decide which. Then you are awake now.")
+
+    # Guaranteed floor/ceiling on kaomoji frequency, decided in code rather
+    # than hoped for from prompt wording alone (a stated percentage in the
+    # prompt isn't reliably followed). FORCE + however many of the ALLOW
+    # rolls actually produce one lands usage between the floor and ceiling.
+    roll = random.random()
+    if roll < KAOMOJI_FORCE_CHANCE:
+        system += ("\n\nFor THIS reply specifically: you MUST include one small cute kaomoji "
+                   "(following all the kaomoji rules above) — don't skip it this time.")
+    elif roll < KAOMOJI_FORCE_CHANCE + KAOMOJI_ALLOW_CHANCE:
+        system += ("\n\nFor THIS reply specifically: you may include a kaomoji if it genuinely "
+                   "fits, but it's also completely fine to skip it.")
+    else:
+        system += "\n\nFor THIS reply specifically: do NOT include any kaomoji at all, no matter what."
 
     response = await asyncio.to_thread(
         gemini.models.generate_content,
