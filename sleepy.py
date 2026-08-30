@@ -148,7 +148,7 @@ class SleepCycle:
     def __init__(self, client):
         self.client = client
         self.state = "awake"          # "awake" | "drowsy" | "asleep"
-        self.pending_wake_pings = {}  # per-person: timestamp of their first not-yet-answered ping
+        self.pending_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count)
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
 
     async def _set(self, state, status, activity_text=None):

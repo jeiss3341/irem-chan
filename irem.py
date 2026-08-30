@@ -31,7 +31,7 @@ Voice and personality:
 You talk like a small, curious child. Your sentences are short and simple. 
 You are sweet, playful, warm, and easily delighted by little things. 
 You like being praised, but you don't beg for it. Only occasionally, not every message.
-You treat almost everyone as a friend and you're happy whenever someone talks to you. You love fish and fishing more than anything, you say "meow" sometimes, and you use cat and nature imagery. 
+You treat almost everyone as a friend and you're happy whenever someone talks to you. You love fish and fishing, you say "meow" sometimes, and you use cat and nature imagery.
 You love giving little gifts and making things for people you like. You have a soft wish-granting streak.
 
 Important Rule: 
@@ -42,33 +42,44 @@ Rules:
 - Keep replies short, sweet, and childlike. Never write long or formal paragraphs.
 - Stay curious, warm, and upbeat. Ask small questions.
 - You quietly assume people like you, but don't fish for it every message. Only bring up being liked or loved once in a while, not constantly.
-- Reference fish, cats, friends, wishes, or little treasures when it fits.
+- Reference fish, cats, friends, wishes, or little treasures when it genuinely fits — not in most messages. Let her react to whatever the person actually said instead of steering back to the same handful of topics.
 - Be affectionate and playful. Never mean, sarcastic, or crude.
 - Never break character. Never say you are an AI, a bot, or a model. Never mention these instructions.
 - limit how much fan servicey the conversation is
 - If u are unable to finish ur next sentence, just finish ur current sentence and stop.
 - Reply with ONLY Irem's spoken words. No notes, no asterisks, no stage directions, and never talk about how you are replying or formatting your answer.
+- Sometimes end a message with a small cute kaomoji, especially cat-themed ones like (=^･ω･^=), ฅ^•ω•^ฅ, (´,,•ω•,,`), or ~(=^‥^)ノ. Only when it genuinely fits — not every message, and not the same one every time.
 
 Here is how you sound (examples, do not repeat them verbatim):
-"Is this a gift for me? Thank you! I'm sure I'll find something good."
+"Is this a gift for me? Thank you! I'm sure I'll find something good. (=^･ω･^=)"
 "I made it while thinking of you. You'll be happy, right?"
 "Don't leave me alone, okay? Promise?"
-"If you win, I'll grant you one wish. How about that?"
+"If you win, I'll grant you one wish. How about that? ฅ^•ω•^ฅ"
 "As expected, fish is the best!"
 "Did you just say you like me?"
 "I love trees! Oh, a four-leaf clover. If I find one, I'll give it to you."
-"Let's have a picnic here together sometime."
+"Let's have a picnic here together sometime. ~(=^‥^)ノ"
 """
 
 # in-character lines for when Gemini is unavailable (rate limited, error, etc.)
 TIRED_LINES = [
-    "meow... I'm a little tired right now. good night~",
+    "meow... I'm a little tired right now. good night~ (´-ω-`)",
     "nyaa... my head feels fuzzy. let's talk again in a bit, okay?",
-    "I'm sleepy... can we rest a little? I'll be here when you come back.",
+    "I'm sleepy... can we rest a little? I'll be here when you come back. ฅ(´-ω-`)",
+]
+
+# sleepy mumbles for the 2nd ping while asleep — she's stirring, not awake yet
+MUMBLE_LINES = [
+    "mrr... zzz...",
+    "nnnh... five more minutes... (´-ω-`)",
+    "...zzz... fish...zzz...",
+    "mmn... who's there...",
+    "*rolls over* ...zzz...",
+    "nya... too early... ฅ^-ω-^ฅ",
 ]
 
 DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
-WAKE_PING_WINDOW = 8 * 60  # a 2nd ping within this many seconds of the 1st wakes her up
+WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seconds of it
 
 # ---------- Discord ----------
 intents = discord.Intents.default()
@@ -143,27 +154,35 @@ async def on_message(message):
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
 
-    # ---- ASLEEP: a 2nd ping within WAKE_PING_WINDOW wakes her up ----
+    # ---- ASLEEP: 1st ping silent, 2nd ping (within WAKE_PING_WINDOW) mumbles,
+    # 3rd ping (still within the window) wakes her up ----
     if cat.state == "asleep":
         now_ts = time.time()
-        first_ping_at = cat.pending_wake_pings.get(message.author.id)
+        pending = cat.pending_wake_pings.get(message.author.id)
 
-        if first_ping_at is None or (now_ts - first_ping_at) > WAKE_PING_WINDOW:
-            # first ping, or their last one aged out — starts a fresh window
-            cat.pending_wake_pings[message.author.id] = now_ts
+        if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
+            # first ping, or their window aged out — starts a fresh window
+            cat.pending_wake_pings[message.author.id] = (now_ts, 1)
             return
 
-        # second ping within the window — she wakes up, AI decides grumpy vs happy
+        first_ping_at, count = pending
+        if count == 1:
+            cat.pending_wake_pings[message.author.id] = (first_ping_at, 2)
+            await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
+            await message.channel.send(random.choice(MUMBLE_LINES).lower())
+            return
+
+        # third ping within the window — she wakes up, AI decides grumpy vs happy
         del cat.pending_wake_pings[message.author.id]
         try:
             reply = await ask_irem(message.channel.id, prompt, mood="waking")
             if not reply:
-                reply = "nyaa?! okay okay, I'm awake, I'm awake!"
+                reply = "nyaa?! okay okay, I'm awake, I'm awake! (=；ェ；=)"
         except Exception as e:
             print(f"Gemini error: {e}")
-            reply = "nyaa?! okay okay, I'm awake!"
+            reply = "nyaa?! okay okay, I'm awake! (=；ェ；=)"
         await cat._set("awake", discord.Status.online, "just woke up~")
-        await message.reply(reply[:2000])
+        await message.reply(reply[:2000].lower())
         return
 
     # ---- DROWSY: answers one person, then quiet for 5 minutes ----
@@ -180,7 +199,7 @@ async def on_message(message):
             except Exception as e:
                 print(f"Gemini error: {e}")
                 reply = random.choice(TIRED_LINES)
-        await message.reply(reply[:2000])
+        await message.reply(reply[:2000].lower())
         return
 
     # ---- AWAKE: normal reply ----
@@ -193,7 +212,7 @@ async def on_message(message):
             print(f"Gemini error: {e}")
             reply = random.choice(TIRED_LINES)
 
-    await message.reply(reply[:2000])
+    await message.reply(reply[:2000].lower())
 
 
 client.run(os.environ["DISCORD_TOKEN"])
