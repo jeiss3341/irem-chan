@@ -104,8 +104,8 @@ def add_tired_kaomoji(text):
 # ask_irem) — FORCE + however many ALLOW rolls actually produce one lands
 # real usage between the floor (KAOMOJI_FORCE_CHANCE) and ceiling
 # (KAOMOJI_FORCE_CHANCE + KAOMOJI_ALLOW_CHANCE).
-KAOMOJI_FORCE_CHANCE = 0.25
-KAOMOJI_ALLOW_CHANCE = 0.15
+KAOMOJI_FORCE_CHANCE = 0.10
+KAOMOJI_ALLOW_CHANCE = 0.20
 
 DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
 WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seconds of it
