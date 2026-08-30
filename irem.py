@@ -8,6 +8,7 @@ import discord
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 from collections import deque, defaultdict
 
 from sleepy import SleepCycle
@@ -17,7 +18,7 @@ load_dotenv()
 # ---------- Gemini ----------
 gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-3.5-flash-lite" # free-tier friendly; swap for a newer flash if your tier has it
-history = defaultdict(lambda: deque(maxlen=10))
+history = defaultdict(lambda: deque(maxlen=50))
 
 IREM_SYSTEM_PROMPT = """You are Irem, a character from the game Eternal Return, chatting in a Discord server.
 
@@ -139,6 +140,15 @@ async def ask_irem(channel_id, user_text, mood="awake"):
     return reply
 
 
+def log_gemini_error(e):
+    # 429 = RESOURCE_EXHAUSTED (rate/quota limit) — flagged distinctly so it's
+    # a one-word Railway log search instead of reading every error's text.
+    if isinstance(e, genai_errors.APIError) and e.code == 429:
+        print(f"Gemini RATE LIMIT hit: {e}")
+    else:
+        print(f"Gemini error: {e}")
+
+
 @client.event
 async def on_message(message):
     if message.author == client.user:
@@ -179,7 +189,7 @@ async def on_message(message):
             if not reply:
                 reply = "nyaa?! okay okay, I'm awake, I'm awake! (=；ェ；=)"
         except Exception as e:
-            print(f"Gemini error: {e}")
+            log_gemini_error(e)
             reply = "nyaa?! okay okay, I'm awake! (=；ェ；=)"
         await cat._set("awake", discord.Status.online, "just woke up~")
         await message.reply(reply[:2000].lower())
@@ -197,7 +207,7 @@ async def on_message(message):
                 if not reply:
                     reply = random.choice(TIRED_LINES)
             except Exception as e:
-                print(f"Gemini error: {e}")
+                log_gemini_error(e)
                 reply = random.choice(TIRED_LINES)
         await message.reply(reply[:2000].lower())
         return
@@ -209,7 +219,7 @@ async def on_message(message):
             if not reply:
                 reply = random.choice(TIRED_LINES)
         except Exception as e:
-            print(f"Gemini error: {e}")
+            log_gemini_error(e)
             reply = random.choice(TIRED_LINES)
 
     await message.reply(reply[:2000].lower())
