@@ -68,6 +68,7 @@ TIRED_LINES = [
 ]
 
 DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
+WAKE_PING_WINDOW = 8 * 60  # a 2nd ping within this many seconds of the 1st wakes her up
 
 # ---------- Discord ----------
 intents = discord.Intents.default()
@@ -142,28 +143,28 @@ async def on_message(message):
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
 
-    # ---- ASLEEP: escalating wake-up, tracked per person ----
+    # ---- ASLEEP: a 2nd ping within WAKE_PING_WINDOW wakes her up ----
     if cat.state == "asleep":
-        cat.poke_counts[message.author.id] = cat.poke_counts.get(message.author.id, 0) + 1
-        pokes = cat.poke_counts[message.author.id]
+        now_ts = time.time()
+        first_ping_at = cat.pending_wake_pings.get(message.author.id)
 
-        if pokes <= 2:
-            return  # ignores the first two pokes entirely
-        elif pokes == 3:
-            await message.channel.send("mrr... zzz...")  # a sleepy mumble
+        if first_ping_at is None or (now_ts - first_ping_at) > WAKE_PING_WINDOW:
+            # first ping, or their last one aged out — starts a fresh window
+            cat.pending_wake_pings[message.author.id] = now_ts
             return
-        else:
-            # fourth poke: she wakes up, AI decides grumpy vs happy
-            try:
-                reply = await ask_irem(message.channel.id, prompt, mood="waking")
-                if not reply:
-                    reply = "nyaa?! okay okay, I'm awake, I'm awake!"
-            except Exception as e:
-                print(f"Gemini error: {e}")
-                reply = "nyaa?! okay okay, I'm awake!"
-            await cat._set("awake", discord.Status.online, "just woke up~")
-            await message.reply(reply[:2000])
-            return
+
+        # second ping within the window — she wakes up, AI decides grumpy vs happy
+        del cat.pending_wake_pings[message.author.id]
+        try:
+            reply = await ask_irem(message.channel.id, prompt, mood="waking")
+            if not reply:
+                reply = "nyaa?! okay okay, I'm awake, I'm awake!"
+        except Exception as e:
+            print(f"Gemini error: {e}")
+            reply = "nyaa?! okay okay, I'm awake!"
+        await cat._set("awake", discord.Status.online, "just woke up~")
+        await message.reply(reply[:2000])
+        return
 
     # ---- DROWSY: answers one person, then quiet for 5 minutes ----
     if cat.state == "drowsy":

@@ -148,7 +148,7 @@ class SleepCycle:
     def __init__(self, client):
         self.client = client
         self.state = "awake"          # "awake" | "drowsy" | "asleep"
-        self.poke_counts = {}         # per-person poke count during current sleep
+        self.pending_wake_pings = {}  # per-person: timestamp of their first not-yet-answered ping
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
 
     async def _set(self, state, status, activity_text=None):
@@ -189,7 +189,7 @@ class SleepCycle:
                     up_slept += 20
                 slept += up_slept
                 if slept < total_seconds:
-                    self.poke_counts.clear()
+                    self.pending_wake_pings.clear()
                     await self._set("asleep", discord.Status.invisible)
 
     async def run(self):
@@ -218,7 +218,7 @@ class SleepCycle:
                 chunk = remaining / (naps_today - i)
                 await asyncio.sleep(random.uniform(0.3, 0.7) * chunk)
 
-                self.poke_counts.clear()
+                self.pending_wake_pings.clear()
                 await self._set("asleep", discord.Status.invisible)
                 nap_total = random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60
                 await self._sleep_wakeable(nap_total)   # naps are wakeable too
@@ -234,7 +234,7 @@ class SleepCycle:
             await asyncio.sleep(DROWSY_LEAD_HOURS * 3600)
 
             # ----- NIGHT SLEEP (wakeable) -----
-            self.poke_counts.clear()
+            self.pending_wake_pings.clear()
             await self._set("asleep", discord.Status.invisible)
             night_total = int(max(3600, NIGHT_SLEEP_HOURS * 3600 + jitter * 60))
             await self._sleep_wakeable(night_total)
