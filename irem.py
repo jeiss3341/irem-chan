@@ -20,6 +20,10 @@ gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-3.5-flash-lite" # free-tier friendly; swap for a newer flash if your tier has it
 history = defaultdict(lambda: deque(maxlen=50))
 
+# guards against a rapid-fire ping spam burning through Gemini calls while awake
+AWAKE_REPLY_COOLDOWN = 3  # seconds, per person
+last_awake_reply = defaultdict(float)
+
 IREM_SYSTEM_PROMPT = """You are Irem, a character from the game Eternal Return, chatting in a Discord server.
 
 Who you are:
@@ -79,6 +83,14 @@ DEEP_SLEEP_LINES = [
     "...zzz",
     "zzz...",
     "..zzz..",
+]
+
+# reply lines for catching her mid-stretch, right after waking up
+STRETCH_FALLBACK_LINES = [
+    "*yawns* good morning...",
+    "*stretches* mrow~",
+    "still waking up... nya",
+    "*big stretch* okay, I'm up~",
 ]
 
 # sleepy mumbles for the 2nd ping while asleep — she's stirring, not awake yet
@@ -144,7 +156,11 @@ cat = SleepCycle(client)
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
-    client.loop.create_task(cat.run())
+    # on_ready can re-fire after a reconnect; guard so we never start a 2nd
+    # sleep-cycle loop racing the first one
+    if not cat.started:
+        cat.started = True
+        client.loop.create_task(cat.run())
 
 
 async def is_reply_to_me(message):
@@ -175,6 +191,11 @@ async def ask_irem(channel_id, user_text, mood="awake"):
         system += ("\n\nRIGHT NOW: You were fast asleep and someone kept poking you awake. "
                    "React in ONE short line. You might be a little grumpy about it, OR sleepily "
                    "delighted to see them, you decide which. Then you are awake now.")
+    elif mood == "stretching":
+        system += ("\n\nRIGHT NOW: You just woke up on your own and are mid-stretch, still a "
+                   "little groggy but in a good mood. Reply in ONE short line, sleepy-cute, "
+                   "maybe mention stretching or yawning — you're basically fine, just easing "
+                   "into being awake.")
 
     # Guaranteed floor/ceiling on kaomoji frequency, decided in code rather
     # than hoped for from prompt wording alone (a stated percentage in the
@@ -278,7 +299,25 @@ async def on_message(message):
         await message.reply(reply[:2000].lower())
         return
 
+    # ---- STRETCHING: just woke up on her own, groggy-but-fine reply ----
+    if cat.state == "stretching":
+        async with message.channel.typing():
+            try:
+                reply = await ask_irem(message.channel.id, prompt, mood="stretching")
+                if not reply:
+                    reply = random.choice(STRETCH_FALLBACK_LINES)
+            except Exception as e:
+                log_gemini_error(e)
+                reply = random.choice(STRETCH_FALLBACK_LINES)
+        await message.reply(reply[:2000].lower())
+        return
+
     # ---- AWAKE: normal reply ----
+    now = time.time()
+    if now - last_awake_reply[message.author.id] < AWAKE_REPLY_COOLDOWN:
+        return
+    last_awake_reply[message.author.id] = now
+
     async with message.channel.typing():
         try:
             reply = await ask_irem(message.channel.id, prompt, mood="awake")

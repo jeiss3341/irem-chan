@@ -6,17 +6,30 @@ import discord
 # ---------- Sleep schedule (server local time, 24h) ----------
 # On Railway the server runs in UTC. To use your time, add a Railway
 # variable:  TZ = America/New_York
-NIGHT_SLEEP_START = 2     # hour she goes to sleep (1 = 1am)
-NIGHT_SLEEP_HOURS = 9     # roughly how long she sleeps at night
-SLEEP_JITTER_MIN  = 60    # +/- up to this many minutes, so bedtime isn't robotic
-DROWSY_LEAD_HOURS = 1     # how long before sleep she gets drowsy
+#
+# She's a kitten with energy, not a mellow adult cat: total sleep is well
+# under a real cat's 12-16 hrs/day, and sleep sessions are short.
+TOTAL_SLEEP_HOURS_MIN = 8
+TOTAL_SLEEP_HOURS_MAX = 12
 
-NAPS_MIN        = 2       # fewest daytime naps
-NAPS_MAX        = 4       # most daytime naps
-NAP_MIN_MINUTES = 30
-NAP_MAX_MINUTES = 90
+SHORT_NAP_MIN_MINUTES = 15
+SHORT_NAP_MAX_MINUTES = 40
+DEEP_SLEEP_MIN_MINUTES = 60
+DEEP_SLEEP_MAX_MINUTES = 100
+DEEP_SLEEP_CHANCE = 0.2    # this fraction of sleep sessions are a longer deep sleep
 
-# If woken during a sleep (nap or night), she stays up this long (random), then dozes off
+AWAKE_MIN_MINUTES = 90     # naps are short, but spaced hours apart so she isn't constantly dozing off
+AWAKE_MAX_MINUTES = 240
+
+# dawn/dusk local hours: real cats are more active then, so awake stretches run longer
+DAWN_HOURS = (5, 8)
+DUSK_HOURS = (18, 21)
+CREPUSCULAR_AWAKE_MULTIPLIER = 1.5
+
+DROWSY_LEAD_MINUTES = 4     # heads-up before any sleep session, so she doesn't just vanish mid-chat
+WAKE_STRETCH_MINUTES = 2    # stretch/yawn moment right after waking up — long enough to realistically get pinged
+
+# If woken during a sleep session, she stays up this long (random), then dozes off
 WOKEN_MIN_MINUTES = 5
 WOKEN_MAX_MINUTES = 25
 
@@ -133,26 +146,26 @@ def pick_awake_status():
     return random.choice(AWAKE_STATUSES)
 
 
-def seconds_until(hour, minute=0):
-    """Seconds from now until the next time it is hour:minute locally."""
-    now = datetime.datetime.now()
-    target = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
-    if target <= now:
-        target += datetime.timedelta(days=1)
-    return (target - now).total_seconds()
+def _in_crepuscular_window():
+    hour = datetime.datetime.now().hour
+    dawn_start, dawn_end = DAWN_HOURS
+    dusk_start, dusk_end = DUSK_HOURS
+    return dawn_start <= hour < dawn_end or dusk_start <= hour < dusk_end
 
 
 class SleepCycle:
-    """Manages Irem's awake / drowsy / asleep state and Discord presence."""
+    """Manages Irem's awake / drowsy / stretching / asleep state and Discord presence."""
 
     def __init__(self, client):
         self.client = client
-        self.state = "awake"          # "awake" | "drowsy" | "asleep"
+        self.state = "awake"          # "awake" | "drowsy" | "asleep" | "stretching"
         self.pending_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count)
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
+        self.started = False          # guards against on_ready re-firing run() after a reconnect
 
     async def _set(self, state, status, activity_text=None):
         self.state = state
+        print(f"[sleep] -> {state}")
         if activity_text:
             await self.client.change_presence(
                 status=status,
@@ -167,7 +180,7 @@ class SleepCycle:
         while not self.client.is_closed():
             wait_hours = random.uniform(STATUS_SHUFFLE_MIN_HOURS, STATUS_SHUFFLE_MAX_HOURS)
             await asyncio.sleep(wait_hours * 3600)
-            # only touch presence when she's actually up; leave drowsy/asleep alone
+            # only touch presence when she's actually up; leave drowsy/asleep/stretching alone
             if self.state == "awake":
                 await self.client.change_presence(
                     status=discord.Status.online,
@@ -176,7 +189,8 @@ class SleepCycle:
 
     async def _sleep_wakeable(self, total_seconds):
         """Sleep for total_seconds, but if a poke sets her 'awake', let her be up
-        a random short while, then doze off again, until the time is used up."""
+        a random short while, then get drowsy and doze off again, until the time
+        is used up."""
         slept = 0
         while slept < total_seconds:
             await asyncio.sleep(20)
@@ -189,53 +203,53 @@ class SleepCycle:
                     up_slept += 20
                 slept += up_slept
                 if slept < total_seconds:
+                    await self._set("drowsy", discord.Status.idle, "getting sleepy again...")
+                    await asyncio.sleep(DROWSY_LEAD_MINUTES * 60)
+                    slept += DROWSY_LEAD_MINUTES * 60
                     self.pending_wake_pings.clear()
                     await self._set("asleep", discord.Status.invisible)
 
+    async def _wake_up(self):
+        """Stretch and yawn, then settle into awake."""
+        await self._set("stretching", discord.Status.idle, "*stretches and yawns*")
+        await asyncio.sleep(WAKE_STRETCH_MINUTES * 60)
+        await self._set("awake", discord.Status.online, pick_awake_status())
+
     async def run(self):
         await self.client.wait_until_ready()
-        # background task: reshuffles her awake status every 3-8 hours
+        # background task: reshuffles her awake status every 1-6 hours
         self.client.loop.create_task(self._shuffle_awake_status())
+        await self._set("awake", discord.Status.online, pick_awake_status())
+
         while not self.client.is_closed():
-            jitter = random.randint(-SLEEP_JITTER_MIN, SLEEP_JITTER_MIN)
-            bedtime = seconds_until(NIGHT_SLEEP_START) + jitter * 60
-            if bedtime < 0:
-                bedtime = seconds_until(NIGHT_SLEEP_START)
+            # pick a fresh daily sleep target (not tied to calendar midnight —
+            # crepuscular timing is read from the real clock each time, so this
+            # cycle can run longer or shorter than 24h without drifting wrong)
+            sleep_target = random.uniform(TOTAL_SLEEP_HOURS_MIN, TOTAL_SLEEP_HOURS_MAX) * 3600
+            slept = 0
 
-            # ----- AWAKE (with a few spread-out daytime naps) -----
-            await self._set("awake", discord.Status.online, pick_awake_status())
+            while slept < sleep_target:
+                # ----- AWAKE stretch -----
+                awake_minutes = random.uniform(AWAKE_MIN_MINUTES, AWAKE_MAX_MINUTES)
+                if _in_crepuscular_window():
+                    awake_minutes *= CREPUSCULAR_AWAKE_MULTIPLIER
+                await asyncio.sleep(awake_minutes * 60)
 
-            naps_today = random.randint(NAPS_MIN, NAPS_MAX)
-            for i in range(naps_today):
-                # how much awake time is left before she needs to get drowsy
-                remaining = (seconds_until(NIGHT_SLEEP_START) + jitter * 60
-                             - DROWSY_LEAD_HOURS * 3600)
-                # stop napping if there isn't comfortable room left in the day
-                if remaining < NAP_MAX_MINUTES * 60 + 1800:
-                    break
-                # split the remaining day into one chunk per remaining nap, then
-                # nap somewhere in the first part of this chunk (keeps them spaced)
-                chunk = remaining / (naps_today - i)
-                await asyncio.sleep(random.uniform(0.3, 0.7) * chunk)
+                # ----- DROWSY heads-up -----
+                await self._set("drowsy", discord.Status.idle, "getting sleepy...")
+                await asyncio.sleep(DROWSY_LEAD_MINUTES * 60)
+
+                # ----- SLEEP (wakeable) -----
+                if random.random() < DEEP_SLEEP_CHANCE:
+                    session_minutes = random.uniform(DEEP_SLEEP_MIN_MINUTES, DEEP_SLEEP_MAX_MINUTES)
+                else:
+                    session_minutes = random.uniform(SHORT_NAP_MIN_MINUTES, SHORT_NAP_MAX_MINUTES)
 
                 self.pending_wake_pings.clear()
                 await self._set("asleep", discord.Status.invisible)
-                nap_total = random.randint(NAP_MIN_MINUTES, NAP_MAX_MINUTES) * 60
-                await self._sleep_wakeable(nap_total)   # naps are wakeable too
-                await self._set("awake", discord.Status.online, pick_awake_status())
+                await self._sleep_wakeable(session_minutes * 60)
+                slept += session_minutes * 60
 
-            # wait out the rest of the day until she gets drowsy
-            drowsy_at = max(0, seconds_until(NIGHT_SLEEP_START) + jitter * 60
-                            - DROWSY_LEAD_HOURS * 3600)
-            await asyncio.sleep(drowsy_at)
-
-            # ----- DROWSY -----
-            await self._set("drowsy", discord.Status.idle, "getting sleepy...")
-            await asyncio.sleep(DROWSY_LEAD_HOURS * 3600)
-
-            # ----- NIGHT SLEEP (wakeable) -----
-            self.pending_wake_pings.clear()
-            await self._set("asleep", discord.Status.invisible)
-            night_total = int(max(3600, NIGHT_SLEEP_HOURS * 3600 + jitter * 60))
-            await self._sleep_wakeable(night_total)
-            # morning: loop back to awake for the new day
+                # ----- WAKE UP (stretch, then awake) -----
+                await self._wake_up()
+            # today's sleep target is used up; loop back and pick a fresh one
