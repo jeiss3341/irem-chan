@@ -72,6 +72,15 @@ TIRED_LINES = [
     "I'm sleepy... can we rest a little? I'll be here when you come back.",
 ]
 
+# barely-there response for the 1st ping while asleep — deep sleep, not
+# stirring yet (that's what MUMBLE_LINES, below, is for on the 2nd ping)
+DEEP_SLEEP_LINES = [
+    "...",
+    "...zzz",
+    "zzz...",
+    "..zzz..",
+]
+
 # sleepy mumbles for the 2nd ping while asleep — she's stirring, not awake yet
 MUMBLE_LINES = [
     "mrr... zzz...",
@@ -80,6 +89,20 @@ MUMBLE_LINES = [
     "mmn... who's there...",
     "*rolls over* ...zzz...",
     "nya... too early...",
+    "mmn... swimming... so many fish...",
+    "nyaa... just one more fish...",
+    "...zzz... a gift... for you...",
+    "nnh... make a wish... zzz...",
+    "mrr... good fish today... zzz...",
+    "...zzz... meow...",
+    "nnh... gonna catch you... zzz...",
+    "*stretches* ...zzz...",
+    "nya... more treasure... zzz...",
+    "...zzz... four-leaf clover...",
+    "nnh... sunny spot... zzz...",
+    "mrr... picnic... zzz...",
+    "...zzz... yarn...",
+    "nya... berries... zzz...",
 ]
 
 # sleepy-themed kaomoji for TIRED_LINES/MUMBLE_LINES — these two are plain
@@ -215,6 +238,7 @@ async def on_message(message):
         if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
             # first ping, or their window aged out — starts a fresh window
             cat.pending_wake_pings[message.author.id] = (now_ts, 1)
+            await message.channel.send(random.choice(DEEP_SLEEP_LINES))
             return
 
         first_ping_at, count = pending
