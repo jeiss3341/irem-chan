@@ -159,12 +159,14 @@ class SleepCycle:
     def __init__(self, client):
         self.client = client
         self.state = "awake"          # "awake" | "drowsy" | "asleep" | "stretching"
+        self.status_text = None       # her current Discord activity text, so she can answer truthfully if asked
         self.pending_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count)
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
         self.started = False          # guards against on_ready re-firing run() after a reconnect
 
     async def _set(self, state, status, activity_text=None):
         self.state = state
+        self.status_text = activity_text
         print(f"[sleep] -> {state}")
         if activity_text:
             await self.client.change_presence(
@@ -182,10 +184,7 @@ class SleepCycle:
             await asyncio.sleep(wait_hours * 3600)
             # only touch presence when she's actually up; leave drowsy/asleep/stretching alone
             if self.state == "awake":
-                await self.client.change_presence(
-                    status=discord.Status.online,
-                    activity=discord.CustomActivity(name=pick_awake_status()),
-                )
+                await self._set("awake", discord.Status.online, pick_awake_status())
 
     async def _sleep_wakeable(self, total_seconds):
         """Sleep for total_seconds, but if a poke sets her 'awake', let her be up

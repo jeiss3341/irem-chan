@@ -181,6 +181,10 @@ async def ask_irem(channel_id, user_text, mood="awake"):
     convo.append({"role": "user", "parts": [{"text": user_text}]})
 
     system = IREM_SYSTEM_PROMPT
+    if cat.status_text:
+        system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
+                   "If anyone asks what you're doing, or about your status, answer truthfully "
+                   "based on this, in character — don't make up something different.")
     if mood == "drowsy":
         system += ("\n\nRIGHT NOW: You are very sleepy and about to nap soon. "
                    "Answer in Irem's voice but drowsy: soft, yawny, trailing off, one short line. "
