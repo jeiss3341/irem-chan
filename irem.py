@@ -272,26 +272,30 @@ async def on_message(message):
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
 
-    # ---- ASLEEP: 1st ping silent, 2nd ping (within WAKE_PING_WINDOW) mumbles,
-    # 3rd ping (still within the window) wakes her up ----
+    # ---- ASLEEP: deep sleep needs 3 pings (1st barely-there, 2nd mumble,
+    # 3rd wakes her), a lighter nap needs only 2 (1st mumble, 2nd wakes her)
+    # — all pings from the same person, within WAKE_PING_WINDOW of the 1st ----
     if cat.state == "asleep":
         now_ts = time.time()
+        wake_threshold = 3 if cat.is_deep_sleep else 2
         pending = cat.pending_wake_pings.get(message.author.id)
 
         if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
             # first ping, or their window aged out — starts a fresh window
-            cat.pending_wake_pings[message.author.id] = (now_ts, 1)
-            await message.channel.send(random.choice(DEEP_SLEEP_LINES))
+            first_ping_at, count = now_ts, 1
+        else:
+            first_ping_at, count = pending[0], pending[1] + 1
+
+        if count < wake_threshold:
+            cat.pending_wake_pings[message.author.id] = (first_ping_at, count)
+            if cat.is_deep_sleep and count == 1:
+                await message.channel.send(random.choice(DEEP_SLEEP_LINES))
+            else:
+                await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
+                await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
             return
 
-        first_ping_at, count = pending
-        if count == 1:
-            cat.pending_wake_pings[message.author.id] = (first_ping_at, 2)
-            await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
-            await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
-            return
-
-        # third ping within the window — she wakes up, AI decides grumpy vs happy
+        # final ping within the window — she wakes up, AI decides grumpy vs happy
         del cat.pending_wake_pings[message.author.id]
         try:
             reply = await ask_irem(message.channel.id, prompt, mood="waking")

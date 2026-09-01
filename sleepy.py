@@ -175,6 +175,7 @@ class SleepCycle:
         self.pending_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count)
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
         self.started = False          # guards against on_ready re-firing run() after a reconnect
+        self.is_deep_sleep = False    # current/most recent sleep session type — lighter naps wake in fewer pings
 
     async def _set(self, state, status, activity_text=None):
         self.state = state
@@ -251,7 +252,8 @@ class SleepCycle:
                 await asyncio.sleep(DROWSY_LEAD_MINUTES * 60)
 
                 # ----- SLEEP (wakeable) -----
-                if random.random() < DEEP_SLEEP_CHANCE:
+                self.is_deep_sleep = random.random() < DEEP_SLEEP_CHANCE
+                if self.is_deep_sleep:
                     session_minutes = random.uniform(DEEP_SLEEP_MIN_MINUTES, DEEP_SLEEP_MAX_MINUTES)
                 else:
                     session_minutes = random.uniform(SHORT_NAP_MIN_MINUTES, SHORT_NAP_MAX_MINUTES)
