@@ -238,10 +238,13 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake"):
     system = IREM_SYSTEM_PROMPT
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
-        system += (f"\n\nYou remember {name} well — one of your close friends, someone you've "
-                   "known for a while. Talking to them, you're more at ease, more familiar, more "
-                   "openly affectionate than with most people. Let that show through naturally "
-                   "in tone and warmth. Don't say it outright or make a big deal of it.")
+        system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
+                   "you've known for a while and trust more than most people. Talking to them, "
+                   "you're more at ease, more familiar, more openly affectionate, and you take "
+                   "what they say more seriously — more willing to listen to them, go along "
+                   "with what they ask or suggest, believe them readily. Let all of this show "
+                   "through naturally in tone and warmth. Don't say it outright or make a big "
+                   "deal of it.")
     if cat.status_text:
         system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
                    "If anyone asks what you're doing, or about your status, answer truthfully "
