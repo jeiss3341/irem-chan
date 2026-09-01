@@ -148,13 +148,14 @@ WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seco
 ALLOWED_GUILD_ID = 1487104327179833375  # she only responds in this server (na norms)
 
 # people she's especially close to — manually curated, edited only by pushing
-# a code change (see docs/memory-system-design.md's "deep connections" tier).
-# Right now this only does two things: 2 combined pings between them always
-# wakes her happy (see the ASLEEP block below), and a light personality nudge
-# in ask_irem — no impressions/DB system yet.
+# a code change (see docs/memory-system-design.md's "deep connections" tier;
+# a real DB-backed memory of them is planned there, not built yet — this is
+# just a static stand-in). Right now this does two things: 2 combined pings
+# between them always wakes her happy (see the ASLEEP block below), and a
+# light personality nudge in ask_irem naming them as remembered friends.
 DEEP_CONNECTIONS = {
-    373931850218864641,  # neotep
-    220690226752913418,  # jeiss
+    373931850218864641: "neotep",
+    220690226752913418: "jeiss",
 }
 
 # ---------- Discord ----------
@@ -236,10 +237,11 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake"):
 
     system = IREM_SYSTEM_PROMPT
     if author_id in DEEP_CONNECTIONS:
-        system += ("\n\nThe person you're talking to right now is someone you're especially "
-                   "close to — more at ease, more familiar, more openly affectionate than with "
-                   "most people, the way you'd be with your closest friend. Let that show through "
-                   "naturally in tone and warmth. Don't say it outright or make a big deal of it.")
+        name = DEEP_CONNECTIONS[author_id]
+        system += (f"\n\nYou remember {name} well — one of your close friends, someone you've "
+                   "known for a while. Talking to them, you're more at ease, more familiar, more "
+                   "openly affectionate than with most people. Let that show through naturally "
+                   "in tone and warmth. Don't say it outright or make a big deal of it.")
     if cat.status_text:
         system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
                    "If anyone asks what you're doing, or about your status, answer truthfully "
