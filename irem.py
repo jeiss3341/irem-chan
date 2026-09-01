@@ -145,6 +145,8 @@ KAOMOJI_ALLOW_CHANCE = 0.20
 DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
 WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seconds of it
 
+ALLOWED_GUILD_ID = 1487104327179833375  # she only responds in this server (na norms)
+
 # ---------- Discord ----------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -161,6 +163,19 @@ async def on_ready():
     if not cat.started:
         cat.started = True
         client.loop.create_task(cat.run())
+    # catches any server she was already in (e.g. added before this guard
+    # existed) as soon as she comes online, not just newly-attempted joins
+    for guild in client.guilds:
+        if guild.id != ALLOWED_GUILD_ID:
+            print(f"[guild-guard] leaving unauthorized server: {guild.name} ({guild.id})")
+            await guild.leave()
+
+
+@client.event
+async def on_guild_join(guild):
+    if guild.id != ALLOWED_GUILD_ID:
+        print(f"[guild-guard] leaving unauthorized server: {guild.name} ({guild.id})")
+        await guild.leave()
 
 
 async def is_reply_to_me(message):
@@ -242,6 +257,9 @@ def log_gemini_error(e):
 @client.event
 async def on_message(message):
     if message.author == client.user:
+        return
+
+    if message.guild is None or message.guild.id != ALLOWED_GUILD_ID:
         return
 
     mentioned = client.user in message.mentions
