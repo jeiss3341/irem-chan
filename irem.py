@@ -149,13 +149,13 @@ ALLOWED_GUILD_ID = 1487104327179833375  # she only responds in this server (na n
 
 # people she's especially close to — manually curated, edited only by pushing
 # a code change (see docs/memory-system-design.md's "deep connections" tier).
-# Right now this only does two things: their pings weigh more toward waking
-# her, and a light personality nudge in ask_irem — no impressions/DB yet.
+# Right now this only does two things: 2 combined pings between them always
+# wakes her happy (see the ASLEEP block below), and a light personality nudge
+# in ask_irem — no impressions/DB system yet.
 DEEP_CONNECTIONS = {
     373931850218864641,  # neotep
     220690226752913418,  # jeiss
 }
-DEEP_CONNECTION_PING_WEIGHT = 2
 
 # ---------- Discord ----------
 intents = discord.Intents.default()
@@ -223,8 +223,16 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake"):
                    "'I'm a little tired', 'can we rest a little?', but say it fresh, not word for word.")
     elif mood == "waking":
         system += ("\n\nRIGHT NOW: You were fast asleep and someone kept poking you awake. "
-                   "React in ONE short line. You might be a little grumpy about it, OR sleepily "
-                   "delighted to see them, you decide which. Then you are awake now.")
+                   "React in ONE short line, based on the message that just woke you: if it's "
+                   "genuinely rude, mean, or annoying, you're allowed to be really annoyed about "
+                   "it — short, cold, a little scratchy or sassy, but still yourself, never actually "
+                   "mean, crude, or biting, she's a person not a feral animal. Otherwise, for a normal "
+                   "or friendly ping, you might be a little grumpy about it, OR sleepily delighted to "
+                   "see them, you decide which. Then you are awake now.")
+    elif mood == "waking_happy":
+        system += ("\n\nRIGHT NOW: You were fast asleep, and the person who just woke you up is "
+                   "someone you're especially close to. React in ONE short line — genuinely happy "
+                   "and sleepily delighted it's them, no grumpiness at all. Then you are awake now.")
     elif mood == "stretching":
         system += ("\n\nRIGHT NOW: You just woke up on your own and are mid-stretch, still a "
                    "little groggy but in a good mood. Reply in ONE short line, sleepy-cute, "
@@ -287,41 +295,72 @@ async def on_message(message):
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
 
-    # ---- ASLEEP: deep sleep needs 3 pings (1st barely-there, 2nd mumble,
-    # 3rd wakes her), a lighter nap needs only 2 (1st mumble, 2nd wakes her)
-    # — pings from ANYONE count toward the same total, within WAKE_PING_WINDOW
-    # of the 1st (not one person pinging that many times themselves). A deep
-    # connection's ping counts extra — she rouses for them faster. ----
+    # ---- ASLEEP: napping wakes on any 3 pings from anyone, added together.
+    # Deep sleep only wakes on 3 pings from the SAME person — different
+    # people pinging once each don't add up there. Either way, jeiss/neotep
+    # (DEEP_CONNECTIONS) combined always wake her in just 2 pings between the
+    # two of them (any combination — doesn't have to be the same one twice),
+    # and she's guaranteed happy to see them, not the usual grumpy/happy roll.
     if cat.state == "asleep":
         now_ts = time.time()
-        wake_threshold = 3 if cat.is_deep_sleep else 2
-        ping_weight = DEEP_CONNECTION_PING_WEIGHT if message.author.id in DEEP_CONNECTIONS else 1
-        pending = cat.wake_ping_progress
+        author_id = message.author.id
 
-        if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
-            # first ping, or the window aged out — starts a fresh window
-            first_ping_at, count = now_ts, ping_weight
-        else:
-            first_ping_at, count = pending[0], pending[1] + ping_weight
-
-        if count < wake_threshold:
-            cat.wake_ping_progress = (first_ping_at, count)
-            if cat.is_deep_sleep and count == 1:
-                await message.channel.send(random.choice(DEEP_SLEEP_LINES))
+        deep_connection_wake = False
+        if author_id in DEEP_CONNECTIONS:
+            dc_pending = cat.deep_connection_ping_progress
+            if dc_pending is None or (now_ts - dc_pending[0]) > WAKE_PING_WINDOW:
+                dc_first_at, dc_count = now_ts, 1
             else:
-                await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
-                await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
-            return
+                dc_first_at, dc_count = dc_pending[0], dc_pending[1] + 1
+            cat.deep_connection_ping_progress = (dc_first_at, dc_count)
+            deep_connection_wake = dc_count >= 2
 
-        # final ping within the window — she wakes up, AI decides grumpy vs happy
+        if not deep_connection_wake:
+            if cat.is_deep_sleep:
+                # deep sleep: needs the SAME person 3x
+                pending = cat.per_person_wake_pings.get(author_id)
+                if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
+                    first_at, count = now_ts, 1
+                else:
+                    first_at, count = pending[0], pending[1] + 1
+
+                if count < 3:
+                    cat.per_person_wake_pings[author_id] = (first_at, count)
+                    if count == 1:
+                        await message.channel.send(random.choice(DEEP_SLEEP_LINES))
+                    else:
+                        await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
+                        await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
+                    return
+            else:
+                # napping: any combination of 3 pings wakes her
+                pending = cat.wake_ping_progress
+                if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
+                    first_at, count = now_ts, 1
+                else:
+                    first_at, count = pending[0], pending[1] + 1
+
+                if count < 3:
+                    cat.wake_ping_progress = (first_at, count)
+                    await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
+                    await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
+                    return
+
+        # she's waking up now — either the deep-connections override, or a
+        # completed same-person (deep sleep) / any-combination (nap) count
         cat.wake_ping_progress = None
+        cat.per_person_wake_pings = {}
+        cat.deep_connection_ping_progress = None
+        mood = "waking_happy" if deep_connection_wake else "waking"
+        fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
+                    else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="waking")
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood)
             if not reply:
-                reply = "nyaa?! okay okay, I'm awake, I'm awake!"
+                reply = fallback
         except Exception as e:
             log_gemini_error(e)
-            reply = "nyaa?! okay okay, I'm awake!"
+            reply = fallback
         await cat._set("awake", discord.Status.online, "just woke up~")
         await message.reply(reply[:2000].lower())
         return

@@ -172,7 +172,9 @@ class SleepCycle:
         self.client = client
         self.state = "awake"          # "awake" | "drowsy" | "asleep" | "stretching"
         self.status_text = None       # her current Discord activity text, so she can answer truthfully if asked
-        self.wake_ping_progress = None  # (timestamp of 1st ping in window, ping count) — shared across everyone, any combination of people's pings counts toward waking her
+        self.wake_ping_progress = None  # (timestamp of 1st ping in window, ping count) — shared across everyone; used while napping, where any combination of people's pings counts
+        self.per_person_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count) — used while in deep sleep, which needs the SAME person 3x
+        self.deep_connection_ping_progress = None  # (timestamp, count) — shared across jeiss/neotep combined; 2 pings between them (any combo) always wakes her, happy, in either sleep type
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
         self.started = False          # guards against on_ready re-firing run() after a reconnect
         self.is_deep_sleep = False    # current/most recent sleep session type — lighter naps wake in fewer pings
@@ -219,6 +221,8 @@ class SleepCycle:
                     await asyncio.sleep(DROWSY_LEAD_MINUTES * 60)
                     slept += DROWSY_LEAD_MINUTES * 60
                     self.wake_ping_progress = None
+                    self.per_person_wake_pings = {}
+                    self.deep_connection_ping_progress = None
                     await self._set("asleep", discord.Status.invisible)
 
     async def _wake_up(self):
@@ -259,6 +263,8 @@ class SleepCycle:
                     session_minutes = random.uniform(SHORT_NAP_MIN_MINUTES, SHORT_NAP_MAX_MINUTES)
 
                 self.wake_ping_progress = None
+                self.per_person_wake_pings = {}
+                self.deep_connection_ping_progress = None
                 await self._set("asleep", discord.Status.invisible)
                 await self._sleep_wakeable(session_minutes * 60)
                 slept += session_minutes * 60
