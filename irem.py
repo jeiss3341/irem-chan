@@ -201,6 +201,35 @@ async def is_reply_to_me(message):
     return isinstance(replied, discord.Message) and replied.author == client.user
 
 
+PINGABLE_SYNTAX_RE = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
+
+
+def humanize_mentions(text, message):
+    """Replace real Discord mention syntax with plain, non-pinging text
+    (e.g. <@123456> -> @SomeName) before it ever reaches Gemini. Otherwise
+    the raw pingable syntax sits in her conversation history/context, and
+    the model sometimes echoes or hallucinates that exact syntax back into
+    her own replies — pinging whoever that ID belongs to, not necessarily
+    who she meant."""
+    for user in message.mentions:
+        text = text.replace(f"<@{user.id}>", f"@{user.display_name}")
+        text = text.replace(f"<@!{user.id}>", f"@{user.display_name}")
+    for role in message.role_mentions:
+        text = text.replace(f"<@&{role.id}>", f"@{role.name}")
+    for channel in message.channel_mentions:
+        text = text.replace(f"<#{channel.id}>", f"#{channel.name}")
+    return text
+
+
+def strip_pingable_syntax(text):
+    """Safety net on the way OUT: strip any raw Discord mention/channel
+    syntax she might still generate or hallucinate, and defang
+    @everyone/@here, so a reply can never actually ping anyone."""
+    text = PINGABLE_SYNTAX_RE.sub("", text)
+    text = re.sub(r"@(everyone|here)", r"\1", text, flags=re.IGNORECASE)
+    return text
+
+
 async def ask_irem(channel_id, user_text, author_id, mood="awake"):
     convo = history[channel_id]
     convo.append({"role": "user", "parts": [{"text": user_text}]})
@@ -290,8 +319,10 @@ async def on_message(message):
     if not (mentioned or replied):
         return
 
-    # remove the bot's @mention from the text before sending to Gemini
+    # remove the bot's @mention, then turn any other real mentions into
+    # plain non-pinging text before this ever reaches Gemini's context
     prompt = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
+    prompt = humanize_mentions(prompt, message)
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
 
@@ -362,7 +393,7 @@ async def on_message(message):
             log_gemini_error(e)
             reply = fallback
         await cat._set("awake", discord.Status.online, "just woke up~")
-        await message.reply(reply[:2000].lower())
+        await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
     # ---- DROWSY: answers one person, then quiet for 5 minutes ----
@@ -379,7 +410,7 @@ async def on_message(message):
             except Exception as e:
                 log_gemini_error(e)
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
-        await message.reply(reply[:2000].lower())
+        await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
     # ---- STRETCHING: just woke up on her own, groggy-but-fine reply ----
@@ -392,7 +423,7 @@ async def on_message(message):
             except Exception as e:
                 log_gemini_error(e)
                 reply = random.choice(STRETCH_FALLBACK_LINES)
-        await message.reply(reply[:2000].lower())
+        await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
     # ---- AWAKE: normal reply ----
@@ -410,7 +441,7 @@ async def on_message(message):
             log_gemini_error(e)
             reply = add_tired_kaomoji(random.choice(TIRED_LINES))
 
-    await message.reply(reply[:2000].lower())
+    await message.reply(strip_pingable_syntax(reply)[:2000].lower())
 
 
 client.run(os.environ["DISCORD_TOKEN"])
