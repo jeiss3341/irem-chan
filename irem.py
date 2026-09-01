@@ -147,6 +147,16 @@ WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seco
 
 ALLOWED_GUILD_ID = 1487104327179833375  # she only responds in this server (na norms)
 
+# people she's especially close to — manually curated, edited only by pushing
+# a code change (see docs/memory-system-design.md's "deep connections" tier).
+# Right now this only does two things: their pings weigh more toward waking
+# her, and a light personality nudge in ask_irem — no impressions/DB yet.
+DEEP_CONNECTIONS = {
+    373931850218864641,  # neotep
+    220690226752913418,  # jeiss
+}
+DEEP_CONNECTION_PING_WEIGHT = 2
+
 # ---------- Discord ----------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -191,11 +201,16 @@ async def is_reply_to_me(message):
     return isinstance(replied, discord.Message) and replied.author == client.user
 
 
-async def ask_irem(channel_id, user_text, mood="awake"):
+async def ask_irem(channel_id, user_text, author_id, mood="awake"):
     convo = history[channel_id]
     convo.append({"role": "user", "parts": [{"text": user_text}]})
 
     system = IREM_SYSTEM_PROMPT
+    if author_id in DEEP_CONNECTIONS:
+        system += ("\n\nThe person you're talking to right now is someone you're especially "
+                   "close to — more at ease, more familiar, more openly affectionate than with "
+                   "most people, the way you'd be with your closest friend. Let that show through "
+                   "naturally in tone and warmth. Don't say it outright or make a big deal of it.")
     if cat.status_text:
         system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
                    "If anyone asks what you're doing, or about your status, answer truthfully "
@@ -274,20 +289,23 @@ async def on_message(message):
 
     # ---- ASLEEP: deep sleep needs 3 pings (1st barely-there, 2nd mumble,
     # 3rd wakes her), a lighter nap needs only 2 (1st mumble, 2nd wakes her)
-    # — all pings from the same person, within WAKE_PING_WINDOW of the 1st ----
+    # — pings from ANYONE count toward the same total, within WAKE_PING_WINDOW
+    # of the 1st (not one person pinging that many times themselves). A deep
+    # connection's ping counts extra — she rouses for them faster. ----
     if cat.state == "asleep":
         now_ts = time.time()
         wake_threshold = 3 if cat.is_deep_sleep else 2
-        pending = cat.pending_wake_pings.get(message.author.id)
+        ping_weight = DEEP_CONNECTION_PING_WEIGHT if message.author.id in DEEP_CONNECTIONS else 1
+        pending = cat.wake_ping_progress
 
         if pending is None or (now_ts - pending[0]) > WAKE_PING_WINDOW:
-            # first ping, or their window aged out — starts a fresh window
-            first_ping_at, count = now_ts, 1
+            # first ping, or the window aged out — starts a fresh window
+            first_ping_at, count = now_ts, ping_weight
         else:
-            first_ping_at, count = pending[0], pending[1] + 1
+            first_ping_at, count = pending[0], pending[1] + ping_weight
 
         if count < wake_threshold:
-            cat.pending_wake_pings[message.author.id] = (first_ping_at, count)
+            cat.wake_ping_progress = (first_ping_at, count)
             if cat.is_deep_sleep and count == 1:
                 await message.channel.send(random.choice(DEEP_SLEEP_LINES))
             else:
@@ -296,9 +314,9 @@ async def on_message(message):
             return
 
         # final ping within the window — she wakes up, AI decides grumpy vs happy
-        del cat.pending_wake_pings[message.author.id]
+        cat.wake_ping_progress = None
         try:
-            reply = await ask_irem(message.channel.id, prompt, mood="waking")
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="waking")
             if not reply:
                 reply = "nyaa?! okay okay, I'm awake, I'm awake!"
         except Exception as e:
@@ -316,7 +334,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, mood="drowsy")
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy")
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -329,7 +347,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, mood="stretching")
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching")
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -346,7 +364,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, mood="awake")
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake")
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:

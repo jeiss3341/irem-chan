@@ -172,7 +172,7 @@ class SleepCycle:
         self.client = client
         self.state = "awake"          # "awake" | "drowsy" | "asleep" | "stretching"
         self.status_text = None       # her current Discord activity text, so she can answer truthfully if asked
-        self.pending_wake_pings = {}  # per-person: (timestamp of 1st ping in window, ping count)
+        self.wake_ping_progress = None  # (timestamp of 1st ping in window, ping count) — shared across everyone, any combination of people's pings counts toward waking her
         self.last_drowsy_reply = 0.0  # timestamp of her last drowsy reply
         self.started = False          # guards against on_ready re-firing run() after a reconnect
         self.is_deep_sleep = False    # current/most recent sleep session type — lighter naps wake in fewer pings
@@ -218,7 +218,7 @@ class SleepCycle:
                     await self._set("drowsy", discord.Status.idle, "getting sleepy again...")
                     await asyncio.sleep(DROWSY_LEAD_MINUTES * 60)
                     slept += DROWSY_LEAD_MINUTES * 60
-                    self.pending_wake_pings.clear()
+                    self.wake_ping_progress = None
                     await self._set("asleep", discord.Status.invisible)
 
     async def _wake_up(self):
@@ -258,7 +258,7 @@ class SleepCycle:
                 else:
                     session_minutes = random.uniform(SHORT_NAP_MIN_MINUTES, SHORT_NAP_MAX_MINUTES)
 
-                self.pending_wake_pings.clear()
+                self.wake_ping_progress = None
                 await self._set("asleep", discord.Status.invisible)
                 await self._sleep_wakeable(session_minutes * 60)
                 slept += session_minutes * 60
