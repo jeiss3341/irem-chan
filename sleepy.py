@@ -9,8 +9,20 @@ import discord
 #
 # She's a kitten with energy, not a mellow adult cat: total sleep is well
 # under a real cat's 12-16 hrs/day, and sleep sessions are short.
-TOTAL_SLEEP_HOURS_MIN = 8
-TOTAL_SLEEP_HOURS_MAX = 12
+#
+# NOTE: TOTAL_SLEEP_HOURS_* is how much she sleeps per SLEEP CYCLE, not per
+# real calendar day — a cycle is "keep napping + waking until that many
+# hours of sleep have accumulated," and each nap is followed by a real
+# AWAKE_MIN/MAX_MINUTES-long stretch. If the awake stretches are long
+# relative to the naps, one cycle's worth of sleep ends up spread across
+# MORE than 24 real hours, and she sleeps noticeably less than the target
+# suggests. These numbers are tuned so a cycle completes in ~1 real day —
+# verified with a Monte Carlo simulation (200 simulated days), not just
+# arithmetic: ~7.7 actual hrs/real-day, ~12 naps/day. If you change
+# SHORT_NAP/DEEP_SLEEP/DEEP_SLEEP_CHANCE/AWAKE_*, re-simulate rather than
+# assuming — the real-day sleep total depends on all of them together.
+TOTAL_SLEEP_HOURS_MIN = 6
+TOTAL_SLEEP_HOURS_MAX = 10
 
 SHORT_NAP_MIN_MINUTES = 15
 SHORT_NAP_MAX_MINUTES = 40
@@ -18,8 +30,8 @@ DEEP_SLEEP_MIN_MINUTES = 60
 DEEP_SLEEP_MAX_MINUTES = 100
 DEEP_SLEEP_CHANCE = 0.2    # this fraction of sleep sessions are a longer deep sleep
 
-AWAKE_MIN_MINUTES = 90     # naps are short, but spaced hours apart so she isn't constantly dozing off
-AWAKE_MAX_MINUTES = 240
+AWAKE_MIN_MINUTES = 35     # short kitten bursts of energy between naps, not hours-long stretches
+AWAKE_MAX_MINUTES = 100
 
 # dawn/dusk local hours: real cats are more active then, so awake stretches run longer
 DAWN_HOURS = (5, 8)
