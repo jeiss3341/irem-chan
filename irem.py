@@ -157,6 +157,13 @@ DEEP_CONNECTIONS = {
     373931850218864641: "neotep",
     220690226752913418: "jeiss",
 }
+# extra name variants to catch when someone brings them up by a nickname
+# rather than their canonical name above — text-matching only, never shown
+# to the model as "her" name for them
+DEEP_CONNECTION_ALIASES = {
+    373931850218864641: ["neotep", "neo"],
+    220690226752913418: ["jeiss"],
+}
 
 # ---------- Discord ----------
 intents = discord.Intents.default()
@@ -231,7 +238,24 @@ def strip_pingable_syntax(text):
     return text
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake"):
+def other_mentioned_deep_connections(message, prompt_text, author_id):
+    """Deep connections referenced in this message who AREN'T the one talking
+    right now — someone else bringing up jeiss/neotep by @mention or by name.
+    Lets her react warmly to them being brought up, not just to them
+    speaking directly (the gap where she'd otherwise treat "who's jeiss?"
+    from a stranger no differently than asking about anyone else)."""
+    found = set()
+    for user in message.mentions:
+        if user.id in DEEP_CONNECTIONS:
+            found.add(user.id)
+    for dc_id, aliases in DEEP_CONNECTION_ALIASES.items():
+        if any(re.search(rf"\b{re.escape(alias)}\b", prompt_text, re.IGNORECASE) for alias in aliases):
+            found.add(dc_id)
+    found.discard(author_id)
+    return found
+
+
+async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None):
     convo = history[channel_id]
     convo.append({"role": "user", "parts": [{"text": user_text}]})
 
@@ -240,11 +264,24 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake"):
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
                    "you've known for a while and trust more than most people. Talking to them, "
-                   "you're more at ease, more familiar, more openly affectionate, and you take "
-                   "what they say more seriously — more willing to listen to them, go along "
-                   "with what they ask or suggest, believe them readily. Let all of this show "
-                   "through naturally in tone and warmth. Don't say it outright or make a big "
-                   "deal of it.")
+                   "you're more at ease, more familiar, more openly affectionate (still "
+                   "platonic, never romantic or flirty, same as with everyone) — and in "
+                   "ordinary, everyday ways you take what they say a little more readily: "
+                   "quicker to believe a casual claim, warmer about a small ask or a joke. "
+                   "This is normal closeness between friends, not blind agreement — if "
+                   "something someone says ever seems genuinely worrying, respond like a "
+                   "caring friend would, not by just going along with it, no matter who said "
+                   "it. Let the closeness show through naturally in tone and warmth. Don't "
+                   "say it outright or make a big deal of it.")
+    elif mentioned_deep_connections:
+        names = [DEEP_CONNECTIONS[i] for i in mentioned_deep_connections]
+        who = names[0] if len(names) == 1 else " and ".join(names)
+        are_is = "is" if len(names) == 1 else "are"
+        system += (f"\n\nThis message brings up {who}, who {are_is} among your deep "
+                   "connections — someone you think of warmly and fondly, even though "
+                   "they're not the one talking to you right now. Let a little of that "
+                   "warmth come through naturally if it fits, without making a big deal "
+                   "of it.")
     if cat.status_text:
         system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
                    "If anyone asks what you're doing, or about your status, answer truthfully "
@@ -330,6 +367,7 @@ async def on_message(message):
     prompt = humanize_mentions(prompt, message)
     if not prompt:
         prompt = "(a friend pinged you without saying anything)"
+    dc_mentioned = other_mentioned_deep_connections(message, prompt, message.author.id)
 
     # ---- ASLEEP: napping wakes on any 3 pings from anyone, added together.
     # Deep sleep only wakes on 3 pings from the SAME person — different
@@ -391,7 +429,7 @@ async def on_message(message):
         fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
                     else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood)
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned)
             if not reply:
                 reply = fallback
         except Exception as e:
@@ -409,7 +447,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy")
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned)
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -422,7 +460,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching")
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned)
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -439,7 +477,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake")
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned)
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:
