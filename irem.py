@@ -34,6 +34,24 @@ _active_gemini_day = datetime.datetime.now().date()  # the day _active_gemini_cl
 MODEL = "gemini-3.5-flash"  # stepped up from flash-lite now that multiple keys give real quota headroom; thinking is capped to 0 below so it doesn't burn tokens on hidden reasoning for a one-line reply
 history = defaultdict(lambda: deque(maxlen=50))
 
+# TEMPORARY stopgap until the real memory system exists (see docs/todo.md):
+# `history` above only ever fills with messages people sent directly TO
+# her, so she has zero visibility into everything said around her — a
+# reply to something she said minutes ago can land with no idea what mood/
+# joke/topic the channel had moved on to in between. This logs EVERY
+# message in the channel (not just ones addressed to her) as lightweight
+# background context, surfaced as plain text in the system prompt, not as
+# real conversation turns she's expected to respond to.
+AMBIENT_LOG_SIZE = 15
+ambient_log = defaultdict(lambda: deque(maxlen=AMBIENT_LOG_SIZE))
+
+
+def format_ambient_context(channel_id):
+    entries = list(ambient_log[channel_id])[:-1]  # drop the message that triggered this call
+    if not entries:
+        return None
+    return "\n".join(f"{name}: {text}" for name, text in entries)
+
 
 def generate_content_with_fallback(**kwargs):
     """Like gemini.models.generate_content, but on a 429 (quota exhausted)
@@ -241,17 +259,24 @@ async def on_guild_join(guild):
         await guild.leave()
 
 
-async def is_reply_to_me(message):
+async def get_replied_message(message):
+    """Resolves the message this one is replying to, IF it's a reply to the
+    bot specifically. Returns the discord.Message so the caller can surface
+    what was actually said, not just a yes/no — otherwise a reply lands with
+    no explicit link back to the specific thing it's responding to, and the
+    model has to guess the relationship from history ordering alone."""
     ref = message.reference
     if ref is None:
-        return False
+        return None
     replied = ref.resolved
     if replied is None and ref.message_id:
         try:
             replied = await message.channel.fetch_message(ref.message_id)
         except (discord.NotFound, discord.HTTPException):
-            return False
-    return isinstance(replied, discord.Message) and replied.author == client.user
+            return None
+    if isinstance(replied, discord.Message) and replied.author == client.user:
+        return replied
+    return None
 
 
 PINGABLE_SYNTAX_RE = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
@@ -323,7 +348,7 @@ async def extract_image_parts(message):
     return parts
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None):
+async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None):
     convo = history[channel_id]
     parts = [{"text": user_text}]
     if image_parts:
@@ -331,6 +356,10 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     convo.append({"role": "user", "parts": parts})
 
     system = IREM_SYSTEM_PROMPT
+    if ambient_context:
+        system += (f"\n\nRecent chatter in the channel, for background context/tone only — "
+                   f"NOT directed at you, don't reply to it directly, just use it to understand "
+                   f"what's actually going on right now (a joke, a mood, a topic):\n{ambient_context}")
     if image_parts:
         system += ("\n\nThis message includes an image or GIF — actually look at it and react "
                    "to what's really there, in your own short, childlike voice. Never describe "
@@ -433,9 +462,15 @@ async def on_message(message):
     if message.guild is None or message.guild.id != ALLOWED_GUILD_ID:
         return
 
+    ambient_text = humanize_mentions(message.content, message).strip()
+    if not ambient_text and message.attachments:
+        ambient_text = "[shared an image]"
+    if ambient_text:
+        ambient_log[message.channel.id].append((message.author.display_name, ambient_text))
+
     mentioned = client.user in message.mentions
-    replied = await is_reply_to_me(message)
-    if not (mentioned or replied):
+    replied_to = await get_replied_message(message)
+    if not (mentioned or replied_to):
         return
 
     # remove the bot's @mention, then turn any other real mentions into
@@ -446,7 +481,13 @@ async def on_message(message):
     if not prompt:
         prompt = ("(a friend shared an image without saying anything)" if image_parts
                    else "(a friend pinged you without saying anything)")
+    if replied_to and replied_to.content:
+        # make the reply relationship explicit instead of leaving the model
+        # to infer it from where things land in the conversation history
+        quoted = humanize_mentions(replied_to.content, replied_to).strip()
+        prompt = f'(replying to what you just said: "{quoted}") {prompt}'
     dc_mentioned = other_mentioned_deep_connections(message, prompt, message.author.id)
+    ambient_ctx = format_ambient_context(message.channel.id)
 
     # ---- ASLEEP: napping wakes on any 3 pings from anyone, added together.
     # Deep sleep only wakes on 3 pings from the SAME person — different
@@ -508,7 +549,7 @@ async def on_message(message):
         fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
                     else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
             if not reply:
                 reply = fallback
         except Exception as e:
@@ -526,7 +567,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -539,7 +580,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -556,7 +597,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:
