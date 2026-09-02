@@ -1,5 +1,6 @@
 import os
 import asyncio
+import datetime
 import random
 import re
 import time
@@ -16,9 +17,52 @@ from sleepy import SleepCycle
 load_dotenv()
 
 # ---------- Gemini ----------
-gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL = "gemini-3.5-flash-lite" # free-tier friendly; swap for a newer flash if your tier has it
+# GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ... — each must come
+# from a separate AI Studio project to actually have its own free-tier quota
+# (multiple keys from the same project share one pool). On a 429 (quota
+# exhausted), generate_content_with_fallback advances to the next key and
+# retries, so normal usage stays on key 1 and the rest are pure overflow.
+_gemini_keys = [os.environ["GEMINI_API_KEY"]]
+i = 2
+while os.environ.get(f"GEMINI_API_KEY_{i}"):
+    _gemini_keys.append(os.environ[f"GEMINI_API_KEY_{i}"])
+    i += 1
+_gemini_clients = [genai.Client(api_key=k) for k in _gemini_keys]
+_active_gemini_client = 0  # index into _gemini_clients; advances when a key 429s
+_active_gemini_day = datetime.datetime.now().date()  # the day _active_gemini_client applies to
+
+MODEL = "gemini-3.5-flash"  # stepped up from flash-lite now that multiple keys give real quota headroom; thinking is capped to 0 below so it doesn't burn tokens on hidden reasoning for a one-line reply
 history = defaultdict(lambda: deque(maxlen=50))
+
+
+def generate_content_with_fallback(**kwargs):
+    """Like gemini.models.generate_content, but on a 429 (quota exhausted)
+    advances to the next configured API key and retries, instead of failing
+    the whole reply. Raises the last error if every key is exhausted.
+
+    Resets back to key 1 at the start of each new day (free-tier daily quotas
+    reset daily), so a key that got exhausted yesterday is tried first again
+    today, rather than staying permanently benched until a process restart."""
+    global _active_gemini_client, _active_gemini_day
+    today = datetime.datetime.now().date()
+    if today != _active_gemini_day:
+        _active_gemini_client = 0
+        _active_gemini_day = today
+
+    last_error = None
+    for _ in range(len(_gemini_clients)):
+        client = _gemini_clients[_active_gemini_client]
+        try:
+            return client.models.generate_content(**kwargs)
+        except genai_errors.APIError as e:
+            last_error = e
+            if e.code != 429:
+                raise
+            log_gemini_error(e)
+            if _active_gemini_client < len(_gemini_clients) - 1:
+                _active_gemini_client += 1
+                print(f"[gemini] switching to API key #{_active_gemini_client + 1}")
+    raise last_error
 
 # guards against a rapid-fire ping spam burning through Gemini calls while awake
 AWAKE_REPLY_COOLDOWN = 3  # seconds, per person
@@ -261,12 +305,6 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     convo.append({"role": "user", "parts": [{"text": user_text}]})
 
     system = IREM_SYSTEM_PROMPT
-    system += ("\n\nYou can look things up online if you genuinely need to (like a current "
-               "fact about Eternal Return, or something happening right now) — but only when "
-               "it actually matters, not for casual chat. And when you do, stay completely "
-               "yourself about it: no citing sources, no 'according to', no info-dump, no "
-               "sounding like a search result. Just casually know the thing, the way a friend "
-               "would mention something they heard, in your own short, childlike voice.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -332,13 +370,13 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         system += "\n\nFor THIS reply specifically: do NOT include any kaomoji at all, no matter what."
 
     response = await asyncio.to_thread(
-        gemini.models.generate_content,
+        generate_content_with_fallback,
         model=MODEL,
         contents=list(convo),
         config=types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=400,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
     )
     reply = (response.text or "").strip()
