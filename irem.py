@@ -261,6 +261,12 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     convo.append({"role": "user", "parts": [{"text": user_text}]})
 
     system = IREM_SYSTEM_PROMPT
+    system += ("\n\nYou can look things up online if you genuinely need to (like a current "
+               "fact about Eternal Return, or something happening right now) — but only when "
+               "it actually matters, not for casual chat. And when you do, stay completely "
+               "yourself about it: no citing sources, no 'according to', no info-dump, no "
+               "sounding like a search result. Just casually know the thing, the way a friend "
+               "would mention something they heard, in your own short, childlike voice.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -332,6 +338,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         config=types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=400,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
         ),
     )
     reply = (response.text or "").strip()
