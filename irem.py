@@ -300,11 +300,42 @@ def other_mentioned_deep_connections(message, prompt_text, author_id):
     return found
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None):
+MAX_IMAGE_ATTACHMENTS = 4
+MAX_IMAGE_BYTES = 15 * 1024 * 1024  # stay safely under Gemini's inline-data size limit
+
+
+async def extract_image_parts(message):
+    """Pull image/gif attachments off a Discord message into Gemini's inline_data
+    part format, so she can actually see what was posted, not just the text."""
+    parts = []
+    for attachment in message.attachments:
+        if len(parts) >= MAX_IMAGE_ATTACHMENTS:
+            break
+        if not attachment.content_type or not attachment.content_type.startswith("image/"):
+            continue
+        if attachment.size > MAX_IMAGE_BYTES:
+            continue
+        try:
+            data = await attachment.read()
+        except discord.HTTPException:
+            continue
+        parts.append({"inline_data": {"mime_type": attachment.content_type, "data": data}})
+    return parts
+
+
+async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None):
     convo = history[channel_id]
-    convo.append({"role": "user", "parts": [{"text": user_text}]})
+    parts = [{"text": user_text}]
+    if image_parts:
+        parts.extend(image_parts)
+    convo.append({"role": "user", "parts": parts})
 
     system = IREM_SYSTEM_PROMPT
+    if image_parts:
+        system += ("\n\nThis message includes an image or GIF — actually look at it and react "
+                   "to what's really there, in your own short, childlike voice. Never describe "
+                   "it clinically or list out details like a caption — just react the way a "
+                   "friend would when someone shows them something.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -411,8 +442,10 @@ async def on_message(message):
     # plain non-pinging text before this ever reaches Gemini's context
     prompt = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
     prompt = humanize_mentions(prompt, message)
+    image_parts = await extract_image_parts(message)
     if not prompt:
-        prompt = "(a friend pinged you without saying anything)"
+        prompt = ("(a friend shared an image without saying anything)" if image_parts
+                   else "(a friend pinged you without saying anything)")
     dc_mentioned = other_mentioned_deep_connections(message, prompt, message.author.id)
 
     # ---- ASLEEP: napping wakes on any 3 pings from anyone, added together.
@@ -475,7 +508,7 @@ async def on_message(message):
         fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
                     else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned)
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
             if not reply:
                 reply = fallback
         except Exception as e:
@@ -493,7 +526,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -506,7 +539,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -523,7 +556,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned)
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts)
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:
