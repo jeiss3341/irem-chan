@@ -1,11 +1,14 @@
 import os
 import asyncio
 import datetime
+import io
 import random
 import re
 import time
 
+import aiohttp
 import discord
+from PIL import Image
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -325,26 +328,117 @@ def other_mentioned_deep_connections(message, prompt_text, author_id):
     return found
 
 
-MAX_IMAGE_ATTACHMENTS = 4
-MAX_IMAGE_BYTES = 15 * 1024 * 1024  # stay safely under Gemini's inline-data size limit
+MAX_MEDIA_ATTACHMENTS = 4
+MAX_MEDIA_BYTES = 15 * 1024 * 1024  # stay safely under Gemini's inline-data size limit
+GIF_SAMPLE_FRAMES = 3  # animated GIFs aren't a supported Gemini mime type, so we
+                        # decode a few frames spread across the animation as plain
+                        # PNGs instead of just handing over the raw file
+
+
+def gif_sample_frames_png(data, max_frames=GIF_SAMPLE_FRAMES):
+    """Decode an animated GIF into up to max_frames PNG snapshots spread evenly
+    across the animation (first/middle/last), since Gemini has no GIF support
+    but does support PNG — this at least gives it a sense of motion instead of
+    a single static frame."""
+    im = Image.open(io.BytesIO(data))
+    n_frames = getattr(im, "n_frames", 1)
+    if n_frames <= 1:
+        indices = [0]
+    else:
+        count = min(max_frames, n_frames)
+        indices = sorted({round(i * (n_frames - 1) / (count - 1)) for i in range(count)})
+    frames = []
+    for idx in indices:
+        im.seek(idx)
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, format="PNG")
+        frames.append(buf.getvalue())
+    return frames
+
+
+def media_bytes_to_parts(data, content_type):
+    """Turn raw media bytes + mime type into Gemini inline_data part(s).
+    GIFs get resampled into a few PNG frames (see gif_sample_frames_png);
+    other images and videos are passed through as-is."""
+    if not content_type:
+        return []
+    if content_type == "image/gif":
+        try:
+            frames = gif_sample_frames_png(data)
+        except Exception:
+            return []
+        if len(frames) > 1:
+            parts = [{"text": "[frames from a GIF someone shared, in order]"}]
+        else:
+            parts = []
+        parts.extend({"inline_data": {"mime_type": "image/png", "data": f}} for f in frames)
+        return parts
+    if content_type.startswith("image/") or content_type.startswith("video/"):
+        return [{"inline_data": {"mime_type": content_type, "data": data}}]
+    return []
+
+
+async def fetch_media_bytes(url, max_bytes=MAX_MEDIA_BYTES):
+    """Download a URL (used for Tenor/Giphy embeds, which link to the actual
+    media rather than attaching it) and return (data, content_type), or
+    (None, None) on any failure or oversized response."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None, None
+                if resp.content_length and resp.content_length > max_bytes:
+                    return None, None
+                data = await resp.content.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    return None, None
+                return data, resp.content_type
+    except aiohttp.ClientError:
+        return None, None
+
+
+async def extract_embed_media(message, limit):
+    """Pull media out of message embeds — this is how Discord's native GIF
+    picker (Tenor/Giphy) actually delivers a GIF: as a link with an embed
+    carrying the real file at embed.video.url, NOT as a message attachment."""
+    parts = []
+    for embed in message.embeds:
+        if len(parts) >= limit:
+            break
+        url = None
+        if embed.video and embed.video.url:
+            url = embed.video.url
+        elif embed.image and embed.image.url:
+            url = embed.image.url
+        if not url:
+            continue
+        data, content_type = await fetch_media_bytes(url)
+        if data is None:
+            continue
+        parts.extend(media_bytes_to_parts(data, content_type))
+    return parts[:limit]
 
 
 async def extract_image_parts(message):
-    """Pull image/gif attachments off a Discord message into Gemini's inline_data
-    part format, so she can actually see what was posted, not just the text."""
+    """Pull image/GIF/video attachments AND GIF embeds (see extract_embed_media)
+    off a Discord message into Gemini's inline_data part format, so she can
+    actually see what was posted, not just the text."""
     parts = []
     for attachment in message.attachments:
-        if len(parts) >= MAX_IMAGE_ATTACHMENTS:
+        if len(parts) >= MAX_MEDIA_ATTACHMENTS:
             break
-        if not attachment.content_type or not attachment.content_type.startswith("image/"):
+        content_type = attachment.content_type
+        if not content_type or not (content_type.startswith("image/") or content_type.startswith("video/")):
             continue
-        if attachment.size > MAX_IMAGE_BYTES:
+        if attachment.size > MAX_MEDIA_BYTES:
             continue
         try:
             data = await attachment.read()
         except discord.HTTPException:
             continue
-        parts.append({"inline_data": {"mime_type": attachment.content_type, "data": data}})
+        parts.extend(media_bytes_to_parts(data, content_type))
+    if len(parts) < MAX_MEDIA_ATTACHMENTS:
+        parts.extend(await extract_embed_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
     return parts
 
 
@@ -361,10 +455,10 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    f"NOT directed at you, don't reply to it directly, just use it to understand "
                    f"what's actually going on right now (a joke, a mood, a topic):\n{ambient_context}")
     if image_parts:
-        system += ("\n\nThis message includes an image or GIF — actually look at it and react "
-                   "to what's really there, in your own short, childlike voice. Never describe "
-                   "it clinically or list out details like a caption — just react the way a "
-                   "friend would when someone shows them something.")
+        system += ("\n\nThis message includes an image, GIF, or video — actually look at it and "
+                   "react to what's really there, in your own short, childlike voice. Never "
+                   "describe it clinically or list out details like a caption — just react the "
+                   "way a friend would when someone shows them something.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -463,8 +557,8 @@ async def on_message(message):
         return
 
     ambient_text = humanize_mentions(message.content, message).strip()
-    if not ambient_text and message.attachments:
-        ambient_text = "[shared an image]"
+    if (not ambient_text or ambient_text.startswith("http")) and (message.attachments or message.embeds):
+        ambient_text = "[shared media]"
     if ambient_text:
         ambient_log[message.channel.id].append((message.author.display_name, ambient_text))
 

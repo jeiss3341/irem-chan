@@ -4,10 +4,12 @@ Small, scoped follow-ups that aren't urgent enough to build right now.
 
 ## Link understanding
 
-She can already see images/GIFs people post (implemented — see
-`extract_image_parts` in `irem.py`). Links are a separate, harder piece:
-having her actually fetch and react to what's behind a URL someone posts,
-not just the raw link text.
+She can already see images, GIFs, and videos people post (implemented —
+see `extract_image_parts` in `irem.py`; GIFs are resampled into a few PNG
+frames since Gemini has no native GIF support, and Tenor/Giphy GIFs shared
+via Discord's picker are pulled from the message embed, not an attachment).
+Links are a separate, harder piece: having her actually fetch and react to
+what's behind a URL someone posts, not just the raw link text.
 
 Why it's harder than images: it means the bot fetching the page itself,
 and several real sites already turned out to block or time out automated
