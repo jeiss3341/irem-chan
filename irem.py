@@ -36,36 +36,51 @@ print(f"[gemini] loaded {len(_gemini_clients)} API key(s)")  # the key-loading l
 # in deploy logs on every startup instead of only discoverable by noticing one
 # key doing all the work in the AI Studio dashboard.
 
-# Free-tier RPD is only 20/day PER MODEL PER PROJECT (500/day for Lite). Each
-# model below (confirmed live via client.models.list()) has its own
-# independent pool on the same project. Priority order, best/newest first —
-# MODEL_CANDIDATES are the "real" non-Lite Flash tiers, FALLBACK_MODEL (Lite)
-# only gets used once every key has exhausted every one of those.
+# Free-tier RPD is ~20/day per model (500/day for the Lite tiers). Evidence
+# from a full day of live testing says that pool is shared across the whole
+# ACCOUNT, not per project -- 10 distinct keys in 10 distinct properly
+# provisioned projects all 429'd on gemini-3.8-flash within the same second,
+# and one project's dashboard read 22/20, over a supposedly hard per-project
+# cap. So extra keys multiply nothing; only extra MODELS add real capacity,
+# since each model has its own separate pool.
+#
+# Priority order, best quality first, walking down as each one drains:
+# current-gen Flash tiers, then last-gen Flash, then the Lite tiers (much
+# bigger pools, noticeably weaker models -- deliberately last so normal
+# traffic never touches them until everything better is gone).
 MODEL_CANDIDATES = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
+    "gemini-3.8-flash",       # ~20/day
+    "gemini-3.7-flash",       # ~20/day
+    "gemini-3.6-flash",       # ~20/day
+    "gemini-3.5-flash",       # ~20/day
+    "gemini-3-flash-preview",  # ~20/day
+    "gemini-2.5-flash",       # ~20/day, last-gen but still full Flash
 ]
-FALLBACK_MODEL = "gemini-3.5-flash-lite"
-ALL_MODEL_TIERS = MODEL_CANDIDATES + [FALLBACK_MODEL]
+FALLBACK_MODELS = [
+    "gemini-3.5-flash-lite",  # ~500/day
+    "gemini-3.1-flash-lite",  # ~500/day
+    "gemini-2.5-flash-lite",  # ~20/day
+]
+ALL_MODEL_TIERS = MODEL_CANDIDATES + FALLBACK_MODELS
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
 # reasoning for a one-line reply
 
-# (model, client) combos flattened into one rotating "slot" index, MODEL-major
-# so a single key never gets hit repeatedly across models while other keys
-# sit idle: slot = model_tier_index * len(_gemini_clients) + client_index.
-# This drains 3.8 across EVERY key before ever touching 3.7 on any key, and
-# so on down through ALL_MODEL_TIERS, hitting Lite only as an absolute last
-# resort after every key has exhausted every real Flash tier. On a 429 (or
-# 5xx) we just move to the next slot (wrapping around), so a light-traffic
-# day only ever touches one slot.
+# (client, model) combos flattened into one rotating "slot" index, KEY-major:
+# slot = client_index * len(ALL_MODEL_TIERS) + model_tier_index.
 #
-# Every new day always starts back at the TOP of the tier list (3.8-flash —
-# slot 0 falls in that tier for every key), never mid-list, but WHICH KEY
-# leads that day still rotates (today's ordinal mod the key count) so one
-# key doesn't always eat the day's first traffic while the others sit idle.
+# Key-major specifically because the daily pool is shared across keys but NOT
+# across models (see above). When 3.8 dies on one key it's dead on all of
+# them, so walking the other 9 keys first would be 9 guaranteed-wasted round
+# trips before reaching 3.7, which actually still has a full pool. This way
+# the first len(ALL_MODEL_TIERS) attempts cover every genuinely distinct pool
+# there is -- finding a live model in ~2s instead of ~18s of grinding through
+# already-dead ones. The remaining slots (same models on other keys) are
+# still tried before giving up, so nothing is lost if the shared-pool theory
+# turns out to be wrong.
+#
+# Every new day still starts at the TOP of the tier list (3.8-flash) and
+# walks down as each model drains, with WHICH KEY leads rotating daily
+# (today's ordinal mod the key count).
 _TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(ALL_MODEL_TIERS)
 _active_gemini_slot = 0
 _active_gemini_day = None  # forces the first call of the process to compute today's start slot
@@ -91,7 +106,7 @@ def format_ambient_context(channel_id):
 
 
 def _slot_to_client_and_model(slot):
-    model_index, client_index = divmod(slot, len(_gemini_clients))
+    client_index, model_index = divmod(slot, len(ALL_MODEL_TIERS))
     return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
@@ -139,7 +154,10 @@ def generate_content_with_fallback(**kwargs):
     global _active_gemini_slot, _active_gemini_day
     today = datetime.datetime.now().date()
     if today != _active_gemini_day:
-        _active_gemini_slot = today.toordinal() % len(_gemini_clients)  # always within the 3.8 tier (slot 0..N-1), just a different key each day
+        # key-major layout, so the start of a key's block is model_index 0
+        # (3.8-flash) -- always start the day on the best model, with a
+        # different key leading each day
+        _active_gemini_slot = (today.toordinal() % len(_gemini_clients)) * len(ALL_MODEL_TIERS)
         _active_gemini_day = today
 
     last_error = None
