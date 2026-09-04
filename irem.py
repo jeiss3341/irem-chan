@@ -442,6 +442,18 @@ PINGABLE_SYNTAX_RE = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
 # <:name:id> for static custom emotes, <a:name:id> for animated ones
 CUSTOM_EMOJI_RE = re.compile(r"<(a?):(\w+):(\d+)>")
 
+# Someone asking her to actually identify what's in a picture, as opposed to
+# just showing her something. Only these get a (budget-limited) web search.
+IDENTIFY_REQUEST_RE = re.compile(
+    r"\b(who|what|which)\b[^?]*\b(is|are|'s|s)\b"      # who is this / what's that / which character is
+    r"|\bwho'?s\b"
+    r"|\bidentify\b|\brecognit?[sz]e\b|\brecognise\b"
+    r"|\bname\s+(of|the|this|that|them|her|him|it)\b"
+    r"|\bdo\s+you\s+know\s+(who|what|this|that|them|her|him|it)\b"
+    r"|\btell\s+me\s+(who|what)\b",
+    re.IGNORECASE,
+)
+
 
 def humanize_mentions(text, message):
     """Replace real Discord mention syntax with plain, non-pinging text
@@ -798,29 +810,34 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     else:
         system += "\n\nFor THIS reply specifically: do NOT include any kaomoji at all, no matter what."
 
-    # Only grounded with live Google Search when there's actual media to identify —
-    # keeps plain-text banter cheap/fast and confines search cost+latency to the
-    # case it was added for (guessing who/what is in an image/GIF/video instead
-    # of hallucinating a name). tool_config forces her to actually RUN a search
-    # rather than just having the option and skipping it — without this, she
-    # can (and does) answer straight from her own "knowledge" (including her
-    # own character bio, which is how a wrong guess like "Wuthering Waves"
-    # leaks in) without ever actually checking. If a model rejects forcing the
-    # built-in search tool this way, _call_model strips it and retries.
+    # Search grounding is forced ONLY when there's media AND someone is
+    # actually asking her to identify it. Grounding draws on its own small
+    # budget, separate from the model quotas, and forcing it on every single
+    # image spends a grounded query on "look at my cat" where there is
+    # nothing to look up -- which is exactly how it got drained to the point
+    # that every media reply started failing. Gating on the question means
+    # the budget goes to the messages that actually need a search.
+    #
+    # Forcing (tool_config) rather than merely offering the tool is
+    # deliberate: given the option, she skips searching and answers from her
+    # own "knowledge", including her character bio, which is how a wrong
+    # guess like "Wuthering Waves" leaks in. If a model rejects the forcing,
+    # or grounding itself is out of budget, _call_model degrades gracefully.
+    #
+    # thinking_budget 0 disables her ability to stop and check herself before
+    # answering -- right for a fast one-line chat reply, wrong when she's
+    # being asked to identify something. -1 lets the model decide how much
+    # reasoning the reply needs.
     tools = None
     tool_config = None
-    # thinking_budget=0 (below) fully disables her ability to "stop and check
-    # herself" before answering -- fine, even desirable, for a fast one-line
-    # chat reply, but it's part of why she'll confidently mirror a wrong
-    # guess instead of catching it. -1 = dynamic thinking, letting the model
-    # decide how much internal reasoning a given reply actually needs, only
-    # turned on for media replies where that self-check is worth the latency
-    # it already accepts from the forced search below.
     thinking_budget = 0
     if image_parts:
-        tools = [types.Tool(google_search=types.GoogleSearch())]
-        tool_config = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
         thinking_budget = -1
+        if IDENTIFY_REQUEST_RE.search(user_text):
+            tools = [types.Tool(google_search=types.GoogleSearch())]
+            tool_config = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode="ANY")
+            )
 
     # If this call fails (rate limit, API error, etc.) or comes back empty, the
     # caller falls back to a canned line — but the user turn appended above
