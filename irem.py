@@ -29,6 +29,12 @@ while os.environ.get(f"GEMINI_API_KEY_{i}"):
     _gemini_keys.append(os.environ[f"GEMINI_API_KEY_{i}"])
     i += 1
 _gemini_clients = [genai.Client(api_key=k) for k in _gemini_keys]
+print(f"[gemini] loaded {len(_gemini_clients)} API key(s)")  # the key-loading loop
+# above stops silently at the first missing GEMINI_API_KEY_N, so a typo'd or
+# gapped env var on the host would otherwise show no error at all -- just a
+# quietly smaller rotation than intended. This makes that immediately visible
+# in deploy logs on every startup instead of only discoverable by noticing one
+# key doing all the work in the AI Studio dashboard.
 
 # Free-tier RPD is only 20/day PER MODEL PER PROJECT (500/day for Lite). Each
 # model below (confirmed live via client.models.list()) has its own
