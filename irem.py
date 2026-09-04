@@ -48,18 +48,20 @@ print(f"[gemini] loaded {len(_gemini_clients)} API key(s)")  # the key-loading l
 # current-gen Flash tiers, then last-gen Flash, then the Lite tiers (much
 # bigger pools, noticeably weaker models -- deliberately last so normal
 # traffic never touches them until everything better is gone).
+# NOTE: models.list() is NOT a reliable signal for what's callable —
+# gemini-2.5-flash and gemini-2.5-flash-lite both appear there but return
+# 404 "no longer available to new users" on an actual request. Verified by
+# calling each one directly; only the models below actually answer.
 MODEL_CANDIDATES = [
     "gemini-3.8-flash",       # ~20/day
     "gemini-3.7-flash",       # ~20/day
     "gemini-3.6-flash",       # ~20/day
     "gemini-3.5-flash",       # ~20/day
     "gemini-3-flash-preview",  # ~20/day
-    "gemini-2.5-flash",       # ~20/day, last-gen but still full Flash
 ]
 FALLBACK_MODELS = [
     "gemini-3.5-flash-lite",  # ~500/day
     "gemini-3.1-flash-lite",  # ~500/day
-    "gemini-2.5-flash-lite",  # ~20/day
 ]
 ALL_MODEL_TIERS = MODEL_CANDIDATES + FALLBACK_MODELS
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
@@ -181,9 +183,20 @@ def generate_content_with_fallback(**kwargs):
         except genai_errors.APIError as e:
             last_error = e
             attempt_elapsed = time.monotonic() - attempt_started
-            if e.code != 429 and e.code < 500:
+            # Only a 400 aborts the whole sweep: after _call_model's config
+            # strips, a 400 means the request itself is malformed, and it'll
+            # be malformed identically on every other slot too.
+            #
+            # Everything else moves on. This used to abort on any non-429
+            # under 500, which turned a single dead model into a wall: a
+            # retired model 404ing mid-list ("no longer available to new
+            # users") killed the sweep before it ever reached the Lite tiers
+            # sitting behind it with 500/day pools untouched. A 404 says
+            # nothing about the next model, and a 403 says nothing about the
+            # next key — neither should cost us every remaining option.
+            if e.code == 400:
                 print(f"[gemini] {model} on key #{client_index + 1} failed permanently "
-                      f"({e.code}) after {attempt_elapsed:.1f}s, giving up (non-retryable)")
+                      f"({e.code}) after {attempt_elapsed:.1f}s, giving up (bad request)")
                 raise
             log_gemini_error(e)
             print(f"[gemini] {model} on key #{client_index + 1} failed ({e.code}) "
