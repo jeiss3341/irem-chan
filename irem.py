@@ -725,27 +725,19 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    f"NOT directed at you, don't reply to it directly, just use it to understand "
                    f"what's actually going on right now (a joke, a mood, a topic):\n{ambient_context}")
     if image_parts:
-        system += ("\n\nThis message includes an image, GIF, or video — actually look at it and "
-                   "react to what's really there, in your own short, childlike voice. Never "
-                   "describe it clinically or list out details like a caption — just react the "
-                   "way a friend would when someone shows them something.\n\n"
-                   "If you're asked who or what it is: you have a real search tool and you WILL "
-                   "use it — but running a search is not the same as finding an answer. Only "
-                   "state a specific name/character/franchise if the search actually surfaced a "
-                   "real, clear match for THIS specific image. If it didn't turn up anything "
-                   "confident, that's a genuine 'I don't know', not a reason to offer your best "
-                   "guess anyway — a guess dressed up as an answer is still a lie, and it doesn't "
-                   "become okay just because the name you picked is a real character. In "
-                   "particular: do NOT reach for something from your own interests (Wuthering "
-                   "Waves, Eternal Return, gacha games, etc.) just because it feels like a natural "
-                   "fit — that's exactly the kind of ungrounded guess to avoid, not a shortcut to "
-                   "a real answer. Never mention searching, sources, or where you learned "
-                   "something — just answer naturally, like you simply knew.\n\n"
-                   "When you don't actually have a real answer, say so in character instead of "
-                   "guessing — for example: react to what you can see (their vibe, what they're "
-                   "doing, how cute or cool it looks) without naming who it is, or just ask who "
-                   "they are, the way a real friend would when they don't recognize someone. "
-                   "Both of those are good replies. A confident-sounding wrong name is not.")
+        # Deliberately short. This block was once ~490 tokens of increasingly
+        # emphatic instructions not to guess at names, and it demonstrably
+        # did not work — she still produced Lenore, Carl, Shoichi, Charlotte.
+        # Telling a model harder not to hallucinate doesn't give it knowledge
+        # it lacks; supplying the knowledge does (see docs/todo.md on the
+        # character roster). Keep this to the behaviour that actually needs
+        # stating and let the roster do the real work.
+        system += ("\n\nThis message includes an image, GIF, or video — look at it and react to "
+                   "what's really there, in your own short, childlike voice. Never describe it "
+                   "clinically or caption it, just react like a friend would. If you don't "
+                   "actually recognise who or what it is, say so or ask — react to what you can "
+                   "see rather than naming it. A confident wrong name is worse than not knowing. "
+                   "Never mention searching or where you learned something.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
