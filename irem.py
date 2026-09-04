@@ -536,6 +536,30 @@ async def extract_embed_media(message, limit):
     return parts[:limit]
 
 
+async def extract_sticker_media(message, limit):
+    """Pull media out of stickers — a THIRD, separate way Discord delivers
+    media on a message (distinct from both attachments and embeds), never
+    checked at all until now. Discord's sticker picker is exactly how small
+    chibi/emote-style images get shared, which is likely why those in
+    particular were invisible to her regardless of how attachments/embeds
+    were handled."""
+    parts = []
+    if not message.stickers:
+        return parts
+    for sticker in message.stickers:
+        if len(parts) >= limit:
+            break
+        if sticker.format is discord.StickerFormatType.lottie:
+            # vector animation JSON, not a raster image/video Gemini can consume
+            print(f"[media:sticker] skipped {sticker.name!r}: lottie format unsupported")
+            continue
+        data, content_type = await fetch_media_bytes(sticker.url)
+        if data is None:
+            continue
+        parts.extend(media_bytes_to_parts(data, content_type, source="sticker"))
+    return parts[:limit]
+
+
 async def extract_image_parts(message):
     """Pull image/GIF/video attachments AND GIF embeds (see extract_embed_media)
     off a Discord message into Gemini's inline_data part format, so she can
@@ -560,6 +584,8 @@ async def extract_image_parts(message):
         parts.extend(media_bytes_to_parts(data, content_type, source="attachment"))
     if len(parts) < MAX_MEDIA_ATTACHMENTS:
         parts.extend(await extract_embed_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
+    if len(parts) < MAX_MEDIA_ATTACHMENTS:
+        parts.extend(await extract_sticker_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
     return parts
 
 
@@ -754,7 +780,7 @@ async def on_message(message):
         return
 
     ambient_text = humanize_mentions(message.content, message).strip()
-    if (not ambient_text or ambient_text.startswith("http")) and (message.attachments or message.embeds):
+    if (not ambient_text or ambient_text.startswith("http")) and (message.attachments or message.embeds or message.stickers):
         ambient_text = "[shared media]"
     if ambient_text:
         ambient_log[message.channel.id].append((message.author.display_name, ambient_text))
