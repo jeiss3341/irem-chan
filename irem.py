@@ -385,6 +385,117 @@ DEEP_CONNECTION_ALIASES = {
     220690226752913418: ["jeiss"],
 }
 
+# ---------- "ignore X for a bit" ----------
+# Only jeiss/neotep can tell her to ignore someone, and only temporarily.
+# In-memory on purpose: these are meant to wear off, so losing them on a
+# redeploy is the correct behaviour rather than a limitation. Standing
+# orders that persist are a separate, bigger piece (see docs/todo.md) and
+# need the database.
+IGNORE_DEFAULT_SECONDS = 30 * 60
+ignored_until = {}  # user_id -> unix timestamp it lapses
+
+IGNORE_CMD_RE = re.compile(
+    r"\b(?:ignore|don'?t\s+(?:reply|respond|talk)\s+to|stop\s+(?:replying|responding|talking)\s+to)\s+(.+)",
+    re.IGNORECASE,
+)
+UNIGNORE_CMD_RE = re.compile(
+    r"\b(?:unignore|stop\s+ignoring|you\s+can\s+(?:talk|reply|respond)\s+to)\s+(.+)",
+    re.IGNORECASE,
+)
+# "for 10 minutes" / "for an hour" / "for 2h" tacked onto either command
+IGNORE_DURATION_RE = re.compile(
+    r"\bfor\s+(?:(\d+)\s*)?(min|mins|minute|minutes|h|hr|hrs|hour|hours)\b", re.IGNORECASE
+)
+
+
+def _parse_ignore_duration(text):
+    match = IGNORE_DURATION_RE.search(text)
+    if not match:
+        return IGNORE_DEFAULT_SECONDS
+    amount = int(match.group(1)) if match.group(1) else 1
+    unit_seconds = 3600 if match.group(2).lower().startswith(("h",)) else 60
+    return max(60, min(amount * unit_seconds, 24 * 3600))
+
+
+def _match_name(members, candidate):
+    for attr in ("display_name", "name", "global_name"):
+        for member in members:
+            value = getattr(member, attr, None)
+            if value and value.lower() == candidate:
+                return member
+    for member in members:  # partial, e.g. "shingai" inside a decorated nick
+        if candidate in (member.display_name or "").lower():
+            return member
+    return None
+
+
+async def _resolve_member(message, text):
+    """Find who a command is talking about — by @mention if there is one,
+    otherwise by name. Real usage is a bare name ("ignore shingai"), not a
+    ping, so name matching isn't optional.
+
+    The members intent isn't enabled, so guild.members only holds whoever
+    happens to be cached; query_members asks the gateway directly and works
+    without the privileged intent, which keeps this from silently failing on
+    someone who hasn't spoken recently."""
+    for user in message.mentions:
+        if user != client.user:
+            return user
+    candidate = re.split(r"\bfor\b", text, 1)[0].strip(" .,!?'\"").lower()
+    if not candidate:
+        return None
+    found = _match_name(message.guild.members, candidate)
+    if found:
+        return found
+    try:
+        return _match_name(await message.guild.query_members(query=candidate, limit=5), candidate)
+    except (discord.HTTPException, asyncio.TimeoutError) as e:
+        print(f"[ignore] member lookup failed for {candidate!r}: {e}")
+        return None
+
+
+async def handle_ignore_command(message, text):
+    """If a deep connection is telling her to ignore/unignore someone, apply
+    it and return a short in-character confirmation. Returns None when this
+    isn't such a command, or when whoever sent it isn't allowed to give one.
+
+    Deep connections can't be ignored — otherwise an order could lock out
+    the only people able to undo it.
+    """
+    if message.author.id not in DEEP_CONNECTIONS:
+        return None
+
+    unignore = UNIGNORE_CMD_RE.search(text)
+    if unignore:
+        target = await _resolve_member(message, unignore.group(1))
+        if target is None:
+            return None
+        ignored_until.pop(target.id, None)
+        print(f"[ignore] {message.author.display_name} cleared ignore on {target.display_name}")
+        return f"okay! i'll talk to {target.display_name} again~"
+
+    ignore = IGNORE_CMD_RE.search(text)
+    if ignore:
+        target = await _resolve_member(message, ignore.group(1))
+        if target is None or target.id in DEEP_CONNECTIONS or target == client.user:
+            return None
+        seconds = _parse_ignore_duration(text)
+        ignored_until[target.id] = time.time() + seconds
+        print(f"[ignore] {message.author.display_name} muted {target.display_name} for {seconds}s")
+        return f"okay, i won't answer {target.display_name} for a little while~"
+
+    return None
+
+
+def is_ignored(user_id):
+    lapses_at = ignored_until.get(user_id)
+    if lapses_at is None:
+        return False
+    if time.time() >= lapses_at:
+        del ignored_until[user_id]
+        return False
+    return True
+
 # ---------- Discord ----------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -914,6 +1025,21 @@ async def on_message(message):
     # plain non-pinging text before this ever reaches Gemini's context
     prompt = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
     prompt = humanize_mentions(prompt, message)
+
+    # A deep connection telling her to ignore someone is handled here rather
+    # than by the model: she'd happily SAY "okay!" to such a request and then
+    # carry on replying, because agreeing and actually falling silent are
+    # different things and only one of them was ever wired up.
+    ignore_reply = await handle_ignore_command(message, prompt)
+    if ignore_reply:
+        await message.reply(ignore_reply)
+        return
+
+    # The silent path. Every other early return above is "this message isn't
+    # for her"; this is the first case where she was addressed and chooses
+    # not to answer, which simply had no way to happen before.
+    if is_ignored(message.author.id):
+        return
     image_parts = await extract_image_parts(message)
     media_was_shared = bool(
         message.attachments or message.embeds or message.stickers
