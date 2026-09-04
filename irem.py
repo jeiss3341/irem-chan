@@ -578,14 +578,24 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         system += ("\n\nThis message includes an image, GIF, or video — actually look at it and "
                    "react to what's really there, in your own short, childlike voice. Never "
                    "describe it clinically or list out details like a caption — just react the "
-                   "way a friend would when someone shows them something. If you're asked who or "
-                   "what it is, you can quietly check the web to actually get it right — but "
-                   "never mention searching, sources, or where you learned it; just answer "
-                   "naturally, like you simply knew. If you genuinely still can't figure out who "
-                   "it is, DO NOT invent a specific name, identity, or backstory for them — "
-                   "that's lying, not being playful. Instead react to what you can actually see "
-                   "(their vibe, what they're doing, how cute or cool it looks), or ask who it "
-                   "is, the way a real friend would when they don't recognize someone.")
+                   "way a friend would when someone shows them something.\n\n"
+                   "If you're asked who or what it is: you have a real search tool and you WILL "
+                   "use it — but running a search is not the same as finding an answer. Only "
+                   "state a specific name/character/franchise if the search actually surfaced a "
+                   "real, clear match for THIS specific image. If it didn't turn up anything "
+                   "confident, that's a genuine 'I don't know', not a reason to offer your best "
+                   "guess anyway — a guess dressed up as an answer is still a lie, and it doesn't "
+                   "become okay just because the name you picked is a real character. In "
+                   "particular: do NOT reach for something from your own interests (Wuthering "
+                   "Waves, Eternal Return, gacha games, etc.) just because it feels like a natural "
+                   "fit — that's exactly the kind of ungrounded guess to avoid, not a shortcut to "
+                   "a real answer. Never mention searching, sources, or where you learned "
+                   "something — just answer naturally, like you simply knew.\n\n"
+                   "When you don't actually have a real answer, say so in character instead of "
+                   "guessing — for example: react to what you can see (their vibe, what they're "
+                   "doing, how cute or cool it looks) without naming who it is, or just ask who "
+                   "they are, the way a real friend would when they don't recognize someone. "
+                   "Both of those are good replies. A confident-sounding wrong name is not.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -686,6 +696,14 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             ),
         )
         reply = (response.text or "").strip()
+        if image_parts:
+            # confirms whether the forced tool_config is actually making her
+            # search, vs silently getting stripped by _call_model's 400
+            # fallback -- without this there's no way to tell "she guessed
+            # instead of searching" from "she searched and still guessed"
+            gm = response.candidates[0].grounding_metadata if response.candidates else None
+            queries = gm.web_search_queries if gm else None
+            print(f"[gemini] media reply search_queries={queries!r}")
     except Exception:
         convo.pop()
         raise
