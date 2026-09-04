@@ -129,19 +129,33 @@ def generate_content_with_fallback(**kwargs):
 
     last_error = None
     start_slot = _active_gemini_slot
+    call_started = time.monotonic()
     for offset in range(_TOTAL_GEMINI_SLOTS):
         slot = (start_slot + offset) % _TOTAL_GEMINI_SLOTS
         client, model, client_index = _slot_to_client_and_model(slot)
+        attempt_started = time.monotonic()
         try:
             response = _call_model(client, model, kwargs)
             _active_gemini_slot = slot  # stick here for the rest of today
+            if offset > 0:
+                # only worth logging when it wasn't a clean first-try success —
+                # this is the number to watch for "why did that reply take so
+                # long": total elapsed here times roughly one Google round-trip
+                # per attempt is exactly what a slow reply looks like.
+                print(f"[gemini] succeeded on attempt {offset + 1}/{_TOTAL_GEMINI_SLOTS} "
+                      f"({model} key #{client_index + 1}) after {time.monotonic() - call_started:.1f}s total")
             return response
         except genai_errors.APIError as e:
             last_error = e
+            attempt_elapsed = time.monotonic() - attempt_started
             if e.code != 429 and e.code < 500:
+                print(f"[gemini] {model} on key #{client_index + 1} failed permanently "
+                      f"({e.code}) after {attempt_elapsed:.1f}s, giving up (non-retryable)")
                 raise
             log_gemini_error(e)
-            print(f"[gemini] {model} on key #{client_index + 1} failed ({e.code}), trying next slot")
+            print(f"[gemini] {model} on key #{client_index + 1} failed ({e.code}) "
+                  f"after {attempt_elapsed:.1f}s, trying next slot")
+    print(f"[gemini] all {_TOTAL_GEMINI_SLOTS} slots exhausted after {time.monotonic() - call_started:.1f}s total")
     raise last_error
 
 # guards against a rapid-fire ping spam burning through Gemini calls while awake
@@ -415,16 +429,28 @@ def gif_sample_frames_png(data, max_frames=GIF_SAMPLE_FRAMES):
     return frames
 
 
-def media_bytes_to_parts(data, content_type):
+MAX_VIDEO_BYTES = 40 * 1024 * 1024  # videos commonly exceed the 15MB image/gif
+# cap on their own just from a few seconds of footage; kept below Gemini's
+# ~20MB base64-inline request ceiling (40MB raw is safely under that after
+# encoding overhead is accounted for) rather than reusing MAX_MEDIA_BYTES
+
+
+def media_bytes_to_parts(data, content_type, source="unknown"):
     """Turn raw media bytes + mime type into Gemini inline_data part(s).
     GIFs get resampled into a few PNG frames (see gif_sample_frames_png);
-    other images and videos are passed through as-is."""
+    other images and videos are passed through as-is. Every rejection is
+    logged (source = "attachment" or "embed") since a silent [] here is
+    indistinguishable from "nothing was ever shared" from the caller's side —
+    exactly the kind of thing that made the last few reports of her not
+    seeing media impossible to diagnose from logs alone."""
     if not content_type:
+        print(f"[media:{source}] rejected: no content_type reported")
         return []
     if content_type == "image/gif":
         try:
             frames = gif_sample_frames_png(data)
-        except Exception:
+        except Exception as e:
+            print(f"[media:{source}] GIF decode failed: {type(e).__name__}: {e}")
             return []
         if len(frames) > 1:
             parts = [{"text": "[frames from a GIF someone shared, in order]"}]
@@ -434,25 +460,38 @@ def media_bytes_to_parts(data, content_type):
         return parts
     if content_type.startswith("image/") or content_type.startswith("video/"):
         return [{"inline_data": {"mime_type": content_type, "data": data}}]
+    print(f"[media:{source}] rejected: unsupported content_type {content_type!r}")
     return []
+
+
+MEDIA_FETCH_TIMEOUT = aiohttp.ClientTimeout(total=8)  # aiohttp's own default is 5 MINUTES —
+# a slow/hanging CDN would otherwise stall the entire reply for that long
 
 
 async def fetch_media_bytes(url, max_bytes=MAX_MEDIA_BYTES):
     """Download a URL (used for Tenor/Giphy embeds, which link to the actual
     media rather than attaching it) and return (data, content_type), or
-    (None, None) on any failure or oversized response."""
+    (None, None) on any failure, timeout, or oversized response — logging
+    exactly which one, since embed fetch failures were previously invisible."""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=MEDIA_FETCH_TIMEOUT) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
+                    print(f"[media:embed] fetch failed: HTTP {resp.status} for {url}")
                     return None, None
                 if resp.content_length and resp.content_length > max_bytes:
+                    print(f"[media:embed] rejected: content-length {resp.content_length} > {max_bytes} for {url}")
                     return None, None
                 data = await resp.content.read(max_bytes + 1)
                 if len(data) > max_bytes:
+                    print(f"[media:embed] rejected: body exceeded {max_bytes} bytes for {url}")
                     return None, None
                 return data, resp.content_type
-    except aiohttp.ClientError:
+    except asyncio.TimeoutError:
+        print(f"[media:embed] fetch timed out after {MEDIA_FETCH_TIMEOUT.total}s for {url}")
+        return None, None
+    except aiohttp.ClientError as e:
+        print(f"[media:embed] fetch error: {type(e).__name__}: {e} for {url}")
         return None, None
 
 
@@ -461,6 +500,8 @@ async def extract_embed_media(message, limit):
     picker (Tenor/Giphy) actually delivers a GIF: as a link with an embed
     carrying the real file at embed.video.url, NOT as a message attachment."""
     parts = []
+    if not message.embeds:
+        return parts
     for embed in message.embeds:
         if len(parts) >= limit:
             break
@@ -470,11 +511,12 @@ async def extract_embed_media(message, limit):
         elif embed.image and embed.image.url:
             url = embed.image.url
         if not url:
+            print(f"[media:embed] embed type={embed.type!r} has no video/image url to fetch")
             continue
         data, content_type = await fetch_media_bytes(url)
         if data is None:
             continue
-        parts.extend(media_bytes_to_parts(data, content_type))
+        parts.extend(media_bytes_to_parts(data, content_type, source="embed"))
     return parts[:limit]
 
 
@@ -488,14 +530,18 @@ async def extract_image_parts(message):
             break
         content_type = attachment.content_type
         if not content_type or not (content_type.startswith("image/") or content_type.startswith("video/")):
+            print(f"[media:attachment] skipped {attachment.filename!r}: content_type={content_type!r}")
             continue
-        if attachment.size > MAX_MEDIA_BYTES:
+        size_cap = MAX_VIDEO_BYTES if content_type.startswith("video/") else MAX_MEDIA_BYTES
+        if attachment.size > size_cap:
+            print(f"[media:attachment] skipped {attachment.filename!r}: {attachment.size} bytes > {size_cap} cap")
             continue
         try:
             data = await attachment.read()
-        except discord.HTTPException:
+        except discord.HTTPException as e:
+            print(f"[media:attachment] failed to read {attachment.filename!r}: {e}")
             continue
-        parts.extend(media_bytes_to_parts(data, content_type))
+        parts.extend(media_bytes_to_parts(data, content_type, source="attachment"))
     if len(parts) < MAX_MEDIA_ATTACHMENTS:
         parts.extend(await extract_embed_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
     return parts
