@@ -526,6 +526,13 @@ async def extract_embed_media(message, limit):
             url = embed.video.url
         elif embed.image and embed.image.url:
             url = embed.image.url
+        elif embed.thumbnail and embed.thumbnail.url:
+            # confirmed live: a real embed showed up as type="image" with
+            # NEITHER .video nor .image populated -- Discord had put the
+            # actual media under .thumbnail instead, and the old code had no
+            # fallback, so image_parts silently ended up empty and she
+            # fabricated a reaction with zero actual visual input.
+            url = embed.thumbnail.url
         if not url:
             print(f"[media:embed] embed type={embed.type!r} has no video/image url to fetch")
             continue
@@ -795,7 +802,19 @@ async def on_message(message):
     prompt = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
     prompt = humanize_mentions(prompt, message)
     image_parts = await extract_image_parts(message)
-    if not prompt:
+    media_was_shared = bool(message.attachments or message.embeds or message.stickers)
+    if media_was_shared and not image_parts:
+        # Something WAS shared, but extraction found nothing usable (an
+        # unsupported format, a fetch failure, an oversized file, an embed
+        # field we don't check, etc. -- see the [media:*] logs for which).
+        # Without this, the prompt looks IDENTICAL to no media being shared
+        # at all, and with a channel history full of "show me a gif" chatter
+        # already primed, she'll fabricate a confident reaction to something
+        # she never actually received rather than noticing anything's wrong.
+        prompt = ("(a friend tried to share an image, GIF, or video, but it failed to come "
+                   "through to you — you did NOT receive it and cannot see it at all, so say "
+                   "so honestly instead of reacting like you saw something) " + prompt).strip()
+    elif not prompt:
         prompt = ("(a friend shared an image without saying anything)" if image_parts
                    else "(a friend pinged you without saying anything)")
     if replied_to and replied_to.content:
