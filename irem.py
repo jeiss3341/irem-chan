@@ -665,6 +665,18 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         convo.pop()
         raise
     if reply:
+        if image_parts:
+            # Drop the raw media bytes from persistent memory now that they've
+            # been used for this reply. Left in place, EVERY image/gif/video
+            # ever shared in this channel gets re-sent in full on every future
+            # call (contents=list(convo) resends the whole history each time),
+            # since nothing here ever pruned it — a channel with a lot of
+            # media testing behind it ends up uploading several MB on every
+            # single message, which is exactly the kind of thing that shows up
+            # as "she got suddenly slow" days or hours later, in that channel
+            # specifically. She can't re-examine old media anyway, only react
+            # to it live, so keeping just the text costs nothing real.
+            convo[-1] = {"role": "user", "parts": [{"text": user_text}]}
         convo.append({"role": "model", "parts": [{"text": reply}]})
     else:
         convo.pop()
