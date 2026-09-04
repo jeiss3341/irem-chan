@@ -118,25 +118,59 @@ def _slot_to_client_and_model(slot):
 # forced tool-calling is documented for user function declarations, not
 # necessarily for built-in tools). Tried in this order: tool_config first
 # since it's the newer/riskier addition, then thinking_config.
-_STRIPPABLE_CONFIG_FIELDS = ("tool_config", "thinking_config")
+def _degrade_for_error(config, code, already_tried):
+    """Pick an optional config field to drop in response to `code`, so a
+    request can be retried in a weaker form instead of failing outright.
+    Returns (field_name, updated_config) or (None, None) if nothing applies.
+
+    - tools on a 429: search grounding has its OWN quota, separate from the
+      model's. Verified directly — the same image, model and key succeeds
+      with no tools and 429s with the search tool attached. So a 429 while
+      tools are set says nothing about the model's own capacity; dropping
+      search means she still SEES the image and reacts, which beats the
+      whole media path collapsing into a canned "I'm tired" line.
+    - tool_config / thinking_config on a 400: some models reject these
+      fields outright (confirmed for gemini-3.6-flash and the Lite tiers on
+      thinking_config), which is a config quirk unrelated to capacity.
+    """
+    candidates = (
+        ("tools", 429),
+        ("tool_config", 400),
+        ("thinking_config", 400),
+    )
+    for field, trigger in candidates:
+        if code != trigger or field in already_tried:
+            continue
+        if getattr(config, field, None) is None:
+            continue
+        update = {field: None}
+        if field == "tools":
+            update["tool_config"] = None  # meaningless with no tools to force
+        return field, config.model_copy(update=update)
+    return None, None
 
 
 def _call_model(client, model, kwargs):
-    """generate_content, but if a 400 looks like the model rejecting one of
-    _STRIPPABLE_CONFIG_FIELDS specifically, strips it and retries instead of
-    burning the whole slot over a config quirk unrelated to quota. Not a
-    hardcoded per-model list (that could go stale) — just reacts to whatever
-    the model actually rejects, one field at a time."""
+    """generate_content, but rather than losing a slot to a failure that's
+    really about one optional config field, drops that field and retries in
+    a weaker form (see _degrade_for_error). Reacts to whatever the API
+    actually complains about instead of a hardcoded per-model list that
+    could go stale."""
     attempt_kwargs = kwargs
-    for field in _STRIPPABLE_CONFIG_FIELDS:
+    tried = set()
+    for _ in range(3):  # at most one retry per strippable field
         try:
             return client.models.generate_content(model=model, **attempt_kwargs)
         except genai_errors.APIError as e:
             config = attempt_kwargs.get("config")
-            if e.code != 400 or config is None or getattr(config, field, None) is None:
+            if config is None:
                 raise
-            print(f"[gemini] {model} rejected {field}, retrying without it")
-            attempt_kwargs = {**attempt_kwargs, "config": config.model_copy(update={field: None})}
+            field, weaker = _degrade_for_error(config, e.code, tried)
+            if field is None:
+                raise
+            tried.add(field)
+            print(f"[gemini] {model}: {e.code} with {field} set, retrying without it")
+            attempt_kwargs = {**attempt_kwargs, "config": weaker}
     return client.models.generate_content(model=model, **attempt_kwargs)
 
 
