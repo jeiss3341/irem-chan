@@ -21,6 +21,68 @@ out when a site blocks it.
 
 Not started yet.
 
+## Standing orders from jeiss/neotep
+
+Let jeiss and neotep give her instructions that actually stick — "stop
+saying meow", "be quieter in #general", "talk more" — and have her follow
+them **permanently**, until one of them says otherwise. Not just for the
+next reply, and not just until the channel history rolls over.
+
+That "permanently" is what makes this a real feature rather than a prompt
+tweak: it needs persistence, so it wants the same storage as the memory
+system below (a Railway redeploy currently wipes everything). Worth doing
+both at once rather than standing up storage twice.
+
+Things to decide when building it:
+
+- **Recognising a command.** Distinguishing "stop saying meow" (an order)
+  from "haha you say meow a lot" (a comment). Probably model judgement in a
+  structured JSON pass rather than keyword matching, similar to the
+  reflection pass below. Getting this wrong in the false-positive direction
+  is worse — she'd silently adopt rules nobody meant to give her.
+- **Scope.** Global, or per-channel? "Be quieter in #general" implies
+  per-channel is at least sometimes wanted.
+- **Listing and revoking.** There has to be a way to see what's currently
+  in force and remove one, or they'll accumulate invisibly and she'll drift
+  for reasons nobody can trace. A cap plus a "what are your rules right
+  now" answer would cover it.
+- **Conflicts.** Later orders should presumably override earlier
+  contradictory ones rather than both sitting in the prompt fighting.
+- **Interaction with the existing guardrail.** `IREM_SYSTEM_PROMPT` already
+  says closeness with deep connections is "not blind agreement" and that
+  she should respond like a caring friend if something seems genuinely
+  worrying, no matter who said it. Standing orders shouldn't quietly erase
+  that.
+
+Only jeiss/neotep (`DEEP_CONNECTIONS`) should be able to set these.
+
+Not started yet.
+
+## Character roster so she can name what she sees
+
+She can see and describe images accurately now, but can't name most
+Eternal Return characters — Gemini simply wasn't trained on them (asked
+directly, with an explicit "reply UNKNOWN if you don't know" escape hatch,
+it answers UNKNOWN for Lumi). No amount of prompt wording fixes that; the
+knowledge has to be supplied.
+
+Groundwork is done: [build_roster.py](../build_roster.py) describes each
+`NNN_Name.png` character art file into
+[characters.json](../characters.json) as one sentence of distinguishing
+visual features, skipping any already described. On three test images the
+roster took identification from 1/3 to 3/3 (Coraline and Henry both went
+from invented names to correct ones) at ~210 tokens for six characters.
+
+Remaining work: get the rest of the character art into `~/Downloads` and
+rerun the script, then wire the roster into a separate identification call
+— image + roster + "which of these is this, or unknown", with no
+personality in it — and feed just the resulting name into her normal reply.
+Keeping it in its own call is the point: her own prompt never grows, and
+the mechanical matching can run on a Lite model where the quota is cheap.
+
+Storage is a file today; moving it into the database is a ten-line change
+if that's preferred, since the data shape is the same either way.
+
 ## Database + real memory of people
 
 The bigger piece — full design already written up in
