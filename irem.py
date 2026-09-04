@@ -89,23 +89,32 @@ def _slot_to_client_and_model(slot):
     return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
+# Config fields that some models reject outright with a 400 (confirmed live
+# for thinking_config on gemini-3.6-flash/gemini-3.5-flash-lite; tool_config
+# forcing the built-in google_search tool is untested for that tool type —
+# forced tool-calling is documented for user function declarations, not
+# necessarily for built-in tools). Tried in this order: tool_config first
+# since it's the newer/riskier addition, then thinking_config.
+_STRIPPABLE_CONFIG_FIELDS = ("tool_config", "thinking_config")
+
+
 def _call_model(client, model, kwargs):
-    """generate_content, but if the model rejects thinking_config outright
-    (some tiers — confirmed live for gemini-3.6-flash and
-    gemini-3.5-flash-lite — 400 on it entirely, not model-specific to those
-    two by anything documented, so this is a blind one-shot retry rather
-    than a hardcoded model list that could go stale) retries once without
-    it instead of burning the whole slot over a config quirk unrelated to
-    quota."""
-    try:
-        return client.models.generate_content(model=model, **kwargs)
-    except genai_errors.APIError as e:
-        config = kwargs.get("config")
-        if e.code == 400 and config is not None and getattr(config, "thinking_config", None) is not None:
-            retry_kwargs = {**kwargs, "config": config.model_copy(update={"thinking_config": None})}
-            print(f"[gemini] {model} rejected thinking_config, retrying without it")
-            return client.models.generate_content(model=model, **retry_kwargs)
-        raise
+    """generate_content, but if a 400 looks like the model rejecting one of
+    _STRIPPABLE_CONFIG_FIELDS specifically, strips it and retries instead of
+    burning the whole slot over a config quirk unrelated to quota. Not a
+    hardcoded per-model list (that could go stale) — just reacts to whatever
+    the model actually rejects, one field at a time."""
+    attempt_kwargs = kwargs
+    for field in _STRIPPABLE_CONFIG_FIELDS:
+        try:
+            return client.models.generate_content(model=model, **attempt_kwargs)
+        except genai_errors.APIError as e:
+            config = attempt_kwargs.get("config")
+            if e.code != 400 or config is None or getattr(config, field, None) is None:
+                raise
+            print(f"[gemini] {model} rejected {field}, retrying without it")
+            attempt_kwargs = {**attempt_kwargs, "config": config.model_copy(update={field: None})}
+    return client.models.generate_content(model=model, **attempt_kwargs)
 
 
 def generate_content_with_fallback(**kwargs):
@@ -638,8 +647,17 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     # Only grounded with live Google Search when there's actual media to identify —
     # keeps plain-text banter cheap/fast and confines search cost+latency to the
     # case it was added for (guessing who/what is in an image/GIF/video instead
-    # of hallucinating a name).
-    tools = [types.Tool(google_search=types.GoogleSearch())] if image_parts else None
+    # of hallucinating a name). tool_config forces her to actually RUN a search
+    # rather than just having the option and skipping it — without this, she
+    # can (and does) answer straight from her own "knowledge" (including her
+    # own character bio, which is how a wrong guess like "Wuthering Waves"
+    # leaks in) without ever actually checking. If a model rejects forcing the
+    # built-in search tool this way, _call_model strips it and retries.
+    tools = None
+    tool_config = None
+    if image_parts:
+        tools = [types.Tool(google_search=types.GoogleSearch())]
+        tool_config = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
 
     # If this call fails (rate limit, API error, etc.) or comes back empty, the
     # caller falls back to a canned line — but the user turn appended above
@@ -658,6 +676,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                 max_output_tokens=400,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
                 tools=tools,
+                tool_config=tool_config,
             ),
         )
         reply = (response.text or "").strip()
