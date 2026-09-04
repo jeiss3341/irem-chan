@@ -22,19 +22,40 @@ load_dotenv()
 # ---------- Gemini ----------
 # GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ... — each must come
 # from a separate AI Studio project to actually have its own free-tier quota
-# (multiple keys from the same project share one pool). On a 429 (quota
-# exhausted), generate_content_with_fallback advances to the next key and
-# retries, so normal usage stays on key 1 and the rest are pure overflow.
+# (multiple keys from the same project share one pool).
 _gemini_keys = [os.environ["GEMINI_API_KEY"]]
 i = 2
 while os.environ.get(f"GEMINI_API_KEY_{i}"):
     _gemini_keys.append(os.environ[f"GEMINI_API_KEY_{i}"])
     i += 1
 _gemini_clients = [genai.Client(api_key=k) for k in _gemini_keys]
-_active_gemini_client = 0  # index into _gemini_clients; advances when a key 429s
-_active_gemini_day = datetime.datetime.now().date()  # the day _active_gemini_client applies to
 
-MODEL = "gemini-3.5-flash"  # stepped up from flash-lite now that multiple keys give real quota headroom; thinking is capped to 0 below so it doesn't burn tokens on hidden reasoning for a one-line reply
+# Free-tier RPD is only 20/day PER MODEL PER PROJECT. Each of these non-Lite
+# Flash models (confirmed live via client.models.list()) is billed as a
+# separate model with its own independent 20-request pool on the same
+# project, so cycling through all of them before moving to the next API key
+# multiplies free daily capacity without ever touching Lite or billing:
+# 5 models x N projects x 20 = 100*N requests/day, all still "real" Flash.
+MODEL_CANDIDATES = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+]
+# thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
+# reasoning for a one-line reply
+
+# (client, model) combos flattened into one rotating "slot" index — slot =
+# client_index * len(MODEL_CANDIDATES) + model_index. On a 429 we just move
+# to the next slot (wrapping around), so a light-traffic day only ever
+# touches one slot. Each new day starts at a DIFFERENT slot (today's ordinal
+# mod the slot count) instead of always slot 0, so whichever combo ate
+# yesterday's traffic gets to sit idle instead of being first in line again
+# today — every slot gets to fully rest for (slot count - 1) days between uses.
+_TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(MODEL_CANDIDATES)
+_active_gemini_slot = 0
+_active_gemini_day = None  # forces the first call of the process to compute today's start slot
 history = defaultdict(lambda: deque(maxlen=50))
 
 # TEMPORARY stopgap until the real memory system exists (see docs/todo.md):
@@ -56,33 +77,40 @@ def format_ambient_context(channel_id):
     return "\n".join(f"{name}: {text}" for name, text in entries)
 
 
+def _slot_to_client_and_model(slot):
+    client_index, model_index = divmod(slot, len(MODEL_CANDIDATES))
+    return _gemini_clients[client_index], MODEL_CANDIDATES[model_index], client_index
+
+
 def generate_content_with_fallback(**kwargs):
     """Like gemini.models.generate_content, but on a 429 (quota exhausted)
-    advances to the next configured API key and retries, instead of failing
-    the whole reply. Raises the last error if every key is exhausted.
+    rotates to the next (key, model) slot and retries, instead of failing
+    the whole reply outright. Raises the last error if every slot is
+    exhausted. `model` must not be passed in kwargs — this function owns it.
 
-    Resets back to key 1 at the start of each new day (free-tier daily quotas
-    reset daily), so a key that got exhausted yesterday is tried first again
-    today, rather than staying permanently benched until a process restart."""
-    global _active_gemini_client, _active_gemini_day
+    Each new day starts at a different slot (see _TOTAL_GEMINI_SLOTS comment
+    above) instead of always slot 0, so load spreads across days too."""
+    global _active_gemini_slot, _active_gemini_day
     today = datetime.datetime.now().date()
     if today != _active_gemini_day:
-        _active_gemini_client = 0
+        _active_gemini_slot = today.toordinal() % _TOTAL_GEMINI_SLOTS
         _active_gemini_day = today
 
     last_error = None
-    for _ in range(len(_gemini_clients)):
-        client = _gemini_clients[_active_gemini_client]
+    start_slot = _active_gemini_slot
+    for offset in range(_TOTAL_GEMINI_SLOTS):
+        slot = (start_slot + offset) % _TOTAL_GEMINI_SLOTS
+        client, model, client_index = _slot_to_client_and_model(slot)
         try:
-            return client.models.generate_content(**kwargs)
+            response = client.models.generate_content(model=model, **kwargs)
+            _active_gemini_slot = slot  # stick here for the rest of today
+            return response
         except genai_errors.APIError as e:
             last_error = e
             if e.code != 429:
                 raise
             log_gemini_error(e)
-            if _active_gemini_client < len(_gemini_clients) - 1:
-                _active_gemini_client += 1
-                print(f"[gemini] switching to API key #{_active_gemini_client + 1}")
+            print(f"[gemini] {model} on key #{client_index + 1} exhausted, trying next slot")
     raise last_error
 
 # guards against a rapid-fire ping spam burning through Gemini calls while awake
@@ -458,7 +486,14 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         system += ("\n\nThis message includes an image, GIF, or video — actually look at it and "
                    "react to what's really there, in your own short, childlike voice. Never "
                    "describe it clinically or list out details like a caption — just react the "
-                   "way a friend would when someone shows them something.")
+                   "way a friend would when someone shows them something. If you're asked who or "
+                   "what it is, you can quietly check the web to actually get it right — but "
+                   "never mention searching, sources, or where you learned it; just answer "
+                   "naturally, like you simply knew. If you genuinely still can't figure out who "
+                   "it is, DO NOT invent a specific name, identity, or backstory for them — "
+                   "that's lying, not being playful. Instead react to what you can actually see "
+                   "(their vibe, what they're doing, how cute or cool it looks), or ask who it "
+                   "is, the way a real friend would when they don't recognize someone.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -523,19 +558,39 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     else:
         system += "\n\nFor THIS reply specifically: do NOT include any kaomoji at all, no matter what."
 
-    response = await asyncio.to_thread(
-        generate_content_with_fallback,
-        model=MODEL,
-        contents=list(convo),
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            max_output_tokens=400,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    reply = (response.text or "").strip()
+    # Only grounded with live Google Search when there's actual media to identify —
+    # keeps plain-text banter cheap/fast and confines search cost+latency to the
+    # case it was added for (guessing who/what is in an image/GIF/video instead
+    # of hallucinating a name).
+    tools = [types.Tool(google_search=types.GoogleSearch())] if image_parts else None
+
+    # If this call fails (rate limit, API error, etc.) or comes back empty, the
+    # caller falls back to a canned line — but the user turn appended above
+    # already sits in `convo`. Left in place with no model turn after it, the
+    # NEXT call adds a second consecutive user turn with nothing answering the
+    # first, and the model then sometimes replies to that stale first message
+    # instead of the current one. Popping it here keeps history well-formed —
+    # a message that got a canned/no reply is simply absent from her memory,
+    # rather than sitting there confusing every reply after it.
+    try:
+        response = await asyncio.to_thread(
+            generate_content_with_fallback,
+            contents=list(convo),
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                max_output_tokens=400,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                tools=tools,
+            ),
+        )
+        reply = (response.text or "").strip()
+    except Exception:
+        convo.pop()
+        raise
     if reply:
         convo.append({"role": "model", "parts": [{"text": reply}]})
+    else:
+        convo.pop()
     return reply
 
 
