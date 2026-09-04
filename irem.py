@@ -672,9 +672,18 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     # built-in search tool this way, _call_model strips it and retries.
     tools = None
     tool_config = None
+    # thinking_budget=0 (below) fully disables her ability to "stop and check
+    # herself" before answering -- fine, even desirable, for a fast one-line
+    # chat reply, but it's part of why she'll confidently mirror a wrong
+    # guess instead of catching it. -1 = dynamic thinking, letting the model
+    # decide how much internal reasoning a given reply actually needs, only
+    # turned on for media replies where that self-check is worth the latency
+    # it already accepts from the forced search below.
+    thinking_budget = 0
     if image_parts:
         tools = [types.Tool(google_search=types.GoogleSearch())]
         tool_config = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
+        thinking_budget = -1
 
     # If this call fails (rate limit, API error, etc.) or comes back empty, the
     # caller falls back to a canned line — but the user turn appended above
@@ -691,7 +700,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             config=types.GenerateContentConfig(
                 system_instruction=system,
                 max_output_tokens=400,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
                 tools=tools,
                 tool_config=tool_config,
             ),
