@@ -30,12 +30,11 @@ while os.environ.get(f"GEMINI_API_KEY_{i}"):
     i += 1
 _gemini_clients = [genai.Client(api_key=k) for k in _gemini_keys]
 
-# Free-tier RPD is only 20/day PER MODEL PER PROJECT. Each of these non-Lite
-# Flash models (confirmed live via client.models.list()) is billed as a
-# separate model with its own independent 20-request pool on the same
-# project, so cycling through all of them before moving to the next API key
-# multiplies free daily capacity without ever touching Lite or billing:
-# 5 models x N projects x 20 = 100*N requests/day, all still "real" Flash.
+# Free-tier RPD is only 20/day PER MODEL PER PROJECT (500/day for Lite). Each
+# model below (confirmed live via client.models.list()) has its own
+# independent pool on the same project. Priority order, best/newest first —
+# MODEL_CANDIDATES are the "real" non-Lite Flash tiers, FALLBACK_MODEL (Lite)
+# only gets used once every key has exhausted every one of those.
 MODEL_CANDIDATES = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -43,17 +42,24 @@ MODEL_CANDIDATES = [
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
 ]
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
+ALL_MODEL_TIERS = MODEL_CANDIDATES + [FALLBACK_MODEL]
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
 # reasoning for a one-line reply
 
-# (client, model) combos flattened into one rotating "slot" index — slot =
-# client_index * len(MODEL_CANDIDATES) + model_index. On a 429 we just move
-# to the next slot (wrapping around), so a light-traffic day only ever
-# touches one slot. Each new day starts at a DIFFERENT slot (today's ordinal
-# mod the slot count) instead of always slot 0, so whichever combo ate
-# yesterday's traffic gets to sit idle instead of being first in line again
-# today — every slot gets to fully rest for (slot count - 1) days between uses.
-_TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(MODEL_CANDIDATES)
+# (model, client) combos flattened into one rotating "slot" index, MODEL-major
+# so a single key never gets hit repeatedly across models while other keys
+# sit idle: slot = model_tier_index * len(_gemini_clients) + client_index.
+# This drains 3.8 across EVERY key before ever touching 3.7 on any key, and
+# so on down through ALL_MODEL_TIERS, hitting Lite only as an absolute last
+# resort after every key has exhausted every real Flash tier. On a 429 we
+# just move to the next slot (wrapping around), so a light-traffic day only
+# ever touches one slot. Each new day starts at a DIFFERENT slot (today's
+# ordinal mod the slot count) instead of always slot 0, so whichever combo
+# ate yesterday's traffic gets to sit idle instead of being first in line
+# again today — every slot gets to fully rest for (slot count - 1) days
+# between uses.
+_TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(ALL_MODEL_TIERS)
 _active_gemini_slot = 0
 _active_gemini_day = None  # forces the first call of the process to compute today's start slot
 history = defaultdict(lambda: deque(maxlen=50))
@@ -78,8 +84,8 @@ def format_ambient_context(channel_id):
 
 
 def _slot_to_client_and_model(slot):
-    client_index, model_index = divmod(slot, len(MODEL_CANDIDATES))
-    return _gemini_clients[client_index], MODEL_CANDIDATES[model_index], client_index
+    model_index, client_index = divmod(slot, len(_gemini_clients))
+    return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
 def generate_content_with_fallback(**kwargs):
