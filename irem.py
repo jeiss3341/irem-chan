@@ -392,6 +392,10 @@ async def get_replied_message(message):
 PINGABLE_SYNTAX_RE = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
 
 
+# <:name:id> for static custom emotes, <a:name:id> for animated ones
+CUSTOM_EMOJI_RE = re.compile(r"<(a?):(\w+):(\d+)>")
+
+
 def humanize_mentions(text, message):
     """Replace real Discord mention syntax with plain, non-pinging text
     (e.g. <@123456> -> @SomeName) before it ever reaches Gemini. Otherwise
@@ -406,6 +410,13 @@ def humanize_mentions(text, message):
         text = text.replace(f"<@&{role.id}>", f"@{role.name}")
     for channel in message.channel_mentions:
         text = text.replace(f"<#{channel.id}>", f"#{channel.name}")
+    # Custom emotes arrive as raw markup in the message text (<:name:id>).
+    # Collapsed to plain :name: so the raw id noise doesn't reach her — the
+    # actual emote IMAGE gets attached separately by extract_emoji_media,
+    # which is what she should actually be reacting to. Left as-is, the name
+    # is all she has, and she'll confidently describe an emote purely from
+    # what it happens to be called.
+    text = CUSTOM_EMOJI_RE.sub(r":\2:", text)
     return text
 
 
@@ -585,6 +596,32 @@ async def extract_sticker_media(message, limit):
     return parts[:limit]
 
 
+async def extract_emoji_media(message, limit):
+    """Pull the actual images for custom emotes — a FOURTH media path, and the
+    sneakiest one, because it doesn't look like media at all: custom emotes
+    are plain text inside message.content (<:name:id>), not attachments,
+    embeds, or stickers. Without this she never sees the emote, only its
+    NAME, and will confidently describe an emote purely from what it's
+    called (an emote named "mythril" gets described as shiny blue metal
+    whether or not that's remotely what it depicts)."""
+    parts = []
+    seen = set()
+    for animated, name, emoji_id in CUSTOM_EMOJI_RE.findall(message.content):
+        if len(parts) >= limit:
+            break
+        if emoji_id in seen:  # same emote repeated in one message
+            continue
+        seen.add(emoji_id)
+        url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if animated else 'png'}"
+        data, content_type = await fetch_media_bytes(url)
+        if data is None:
+            print(f"[media:emoji] could not fetch :{name}: ({emoji_id})")
+            continue
+        parts.append({"text": f"[the custom emote :{name}: looks like this]"})
+        parts.extend(media_bytes_to_parts(data, content_type, source="emoji"))
+    return parts[:limit]
+
+
 async def extract_image_parts(message):
     """Pull image/GIF/video attachments AND GIF embeds (see extract_embed_media)
     off a Discord message into Gemini's inline_data part format, so she can
@@ -611,6 +648,8 @@ async def extract_image_parts(message):
         parts.extend(await extract_embed_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
     if len(parts) < MAX_MEDIA_ATTACHMENTS:
         parts.extend(await extract_sticker_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
+    if len(parts) < MAX_MEDIA_ATTACHMENTS:
+        parts.extend(await extract_emoji_media(message, MAX_MEDIA_ATTACHMENTS - len(parts)))
     return parts
 
 
@@ -820,7 +859,10 @@ async def on_message(message):
     prompt = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
     prompt = humanize_mentions(prompt, message)
     image_parts = await extract_image_parts(message)
-    media_was_shared = bool(message.attachments or message.embeds or message.stickers)
+    media_was_shared = bool(
+        message.attachments or message.embeds or message.stickers
+        or CUSTOM_EMOJI_RE.search(message.content)
+    )
     if media_was_shared and not image_parts:
         # Something WAS shared, but extraction found nothing usable (an
         # unsupported format, a fetch failure, an oversized file, an embed
