@@ -88,11 +88,35 @@ def _slot_to_client_and_model(slot):
     return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
+def _call_model(client, model, kwargs):
+    """generate_content, but if the model rejects thinking_config outright
+    (some tiers — confirmed live for gemini-3.6-flash and
+    gemini-3.5-flash-lite — 400 on it entirely, not model-specific to those
+    two by anything documented, so this is a blind one-shot retry rather
+    than a hardcoded model list that could go stale) retries once without
+    it instead of burning the whole slot over a config quirk unrelated to
+    quota."""
+    try:
+        return client.models.generate_content(model=model, **kwargs)
+    except genai_errors.APIError as e:
+        config = kwargs.get("config")
+        if e.code == 400 and config is not None and getattr(config, "thinking_config", None) is not None:
+            retry_kwargs = {**kwargs, "config": config.model_copy(update={"thinking_config": None})}
+            print(f"[gemini] {model} rejected thinking_config, retrying without it")
+            return client.models.generate_content(model=model, **retry_kwargs)
+        raise
+
+
 def generate_content_with_fallback(**kwargs):
-    """Like gemini.models.generate_content, but on a 429 (quota exhausted)
-    rotates to the next (key, model) slot and retries, instead of failing
-    the whole reply outright. Raises the last error if every slot is
-    exhausted. `model` must not be passed in kwargs — this function owns it.
+    """Like gemini.models.generate_content, but on a 429 (quota exhausted) or
+    a 5xx (transient server-side issue, e.g. "model overloaded") rotates to
+    the next (key, model) slot and retries, instead of failing the whole
+    reply outright. A different slot is a different key/model pairing, so
+    it's a reasonable thing to try for a transient server error too, not
+    just quota. Any other error (bad request, auth, etc.) raises immediately
+    — a different slot is very unlikely to fix a malformed request itself.
+    Raises the last error if every slot is exhausted. `model` must not be
+    passed in kwargs — this function owns it.
 
     Each new day starts at a different slot (see _TOTAL_GEMINI_SLOTS comment
     above) instead of always slot 0, so load spreads across days too."""
@@ -108,15 +132,15 @@ def generate_content_with_fallback(**kwargs):
         slot = (start_slot + offset) % _TOTAL_GEMINI_SLOTS
         client, model, client_index = _slot_to_client_and_model(slot)
         try:
-            response = client.models.generate_content(model=model, **kwargs)
+            response = _call_model(client, model, kwargs)
             _active_gemini_slot = slot  # stick here for the rest of today
             return response
         except genai_errors.APIError as e:
             last_error = e
-            if e.code != 429:
+            if e.code != 429 and e.code < 500:
                 raise
             log_gemini_error(e)
-            print(f"[gemini] {model} on key #{client_index + 1} exhausted, trying next slot")
+            print(f"[gemini] {model} on key #{client_index + 1} failed ({e.code}), trying next slot")
     raise last_error
 
 # guards against a rapid-fire ping spam burning through Gemini calls while awake
