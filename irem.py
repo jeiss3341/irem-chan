@@ -52,13 +52,14 @@ ALL_MODEL_TIERS = MODEL_CANDIDATES + [FALLBACK_MODEL]
 # sit idle: slot = model_tier_index * len(_gemini_clients) + client_index.
 # This drains 3.8 across EVERY key before ever touching 3.7 on any key, and
 # so on down through ALL_MODEL_TIERS, hitting Lite only as an absolute last
-# resort after every key has exhausted every real Flash tier. On a 429 we
-# just move to the next slot (wrapping around), so a light-traffic day only
-# ever touches one slot. Each new day starts at a DIFFERENT slot (today's
-# ordinal mod the slot count) instead of always slot 0, so whichever combo
-# ate yesterday's traffic gets to sit idle instead of being first in line
-# again today — every slot gets to fully rest for (slot count - 1) days
-# between uses.
+# resort after every key has exhausted every real Flash tier. On a 429 (or
+# 5xx) we just move to the next slot (wrapping around), so a light-traffic
+# day only ever touches one slot.
+#
+# Every new day always starts back at the TOP of the tier list (3.8-flash —
+# slot 0 falls in that tier for every key), never mid-list, but WHICH KEY
+# leads that day still rotates (today's ordinal mod the key count) so one
+# key doesn't always eat the day's first traffic while the others sit idle.
 _TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(ALL_MODEL_TIERS)
 _active_gemini_slot = 0
 _active_gemini_day = None  # forces the first call of the process to compute today's start slot
@@ -118,12 +119,12 @@ def generate_content_with_fallback(**kwargs):
     Raises the last error if every slot is exhausted. `model` must not be
     passed in kwargs — this function owns it.
 
-    Each new day starts at a different slot (see _TOTAL_GEMINI_SLOTS comment
-    above) instead of always slot 0, so load spreads across days too."""
+    Each new day always starts back at the 3.8-flash tier, just with a
+    different key leading (see the comment above _TOTAL_GEMINI_SLOTS)."""
     global _active_gemini_slot, _active_gemini_day
     today = datetime.datetime.now().date()
     if today != _active_gemini_day:
-        _active_gemini_slot = today.toordinal() % _TOTAL_GEMINI_SLOTS
+        _active_gemini_slot = today.toordinal() % len(_gemini_clients)  # always within the 3.8 tier (slot 0..N-1), just a different key each day
         _active_gemini_day = today
 
     last_error = None
