@@ -927,15 +927,19 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     # guess like "Wuthering Waves" leaks in. If a model rejects the forcing,
     # or grounding itself is out of budget, _call_model degrades gracefully.
     #
-    # thinking_budget 0 disables her ability to stop and check herself before
-    # answering -- right for a fast one-line chat reply, wrong when she's
-    # being asked to identify something. -1 lets the model decide how much
-    # reasoning the reply needs.
+    # Thinking stays OFF, including for media. Dynamic thinking (-1) was
+    # tried here and actively broke media replies: measured on a real image,
+    # it spent 382 of the 400 output tokens on hidden reasoning, leaving 18
+    # for the reply and finishing on MAX_TOKENS. When it consumes the whole
+    # budget response.text comes back empty, empty is treated as a failed
+    # call, and she answers with the canned "i'm sleepy..." line -- which
+    # looked exactly like her failing to understand the picture, when in
+    # fact she never got to reply at all. Her replies are one short line;
+    # she does not need a reasoning budget larger than the answer.
     tools = None
     tool_config = None
     thinking_budget = 0
     if image_parts:
-        thinking_budget = -1
         if IDENTIFY_REQUEST_RE.search(user_text):
             tools = [types.Tool(google_search=types.GoogleSearch())]
             tool_config = types.ToolConfig(
@@ -971,6 +975,15 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             gm = response.candidates[0].grounding_metadata if response.candidates else None
             queries = gm.web_search_queries if gm else None
             print(f"[gemini] media reply search_queries={queries!r}")
+        # An empty or truncated reply is indistinguishable downstream from a
+        # failed call -- both end up as the canned "tired" line, which reads
+        # as her not understanding rather than as a bug. Say so explicitly.
+        finish = response.candidates[0].finish_reason if response.candidates else None
+        if str(finish or "").endswith("MAX_TOKENS") or not reply:
+            usage = response.usage_metadata
+            print(f"[gemini] reply truncated/empty: finish={finish} "
+                  f"thinking_tokens={getattr(usage, 'thoughts_token_count', 0) or 0} "
+                  f"output_tokens={getattr(usage, 'candidates_token_count', 0) or 0}")
     except Exception:
         convo.pop()
         raise
