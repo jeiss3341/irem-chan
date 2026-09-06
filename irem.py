@@ -408,19 +408,44 @@ UNIGNORE_CMD_RE = re.compile(
 UNIGNORE_AGAIN_RE = re.compile(
     r"\b(?:talk|reply|respond|answer)\s+to\s+(.+?)\s+again\b", re.IGNORECASE,
 )
-# "for 10 minutes" / "for an hour" / "for 2h" tacked onto either command
+# "for 10 minutes" / "for an hour" / "for 2h" / "for a day" tacked on
 IGNORE_DURATION_RE = re.compile(
-    r"\bfor\s+(?:(\d+)\s*)?(min|mins|minute|minutes|h|hr|hrs|hour|hours)\b", re.IGNORECASE
+    r"\bfor\s+(?:(\d+)\s*|an?\s+)?(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b",
+    re.IGNORECASE,
 )
+# "forever", "for the rest of the day" -- these all plainly mean "much longer
+# than half an hour", and every one of them silently got exactly half an hour.
+IGNORE_LONG_RE = re.compile(
+    r"\b(?:forever|permanently|indefinitely|for\s+good|rest\s+of\s+(?:the\s+)?day|all\s+day)\b",
+    re.IGNORECASE,
+)
+IGNORE_MAX_SECONDS = 24 * 3600
 
 
 def _parse_ignore_duration(text):
     match = IGNORE_DURATION_RE.search(text)
-    if not match:
-        return IGNORE_DEFAULT_SECONDS
-    amount = int(match.group(1)) if match.group(1) else 1
-    unit_seconds = 3600 if match.group(2).lower().startswith(("h",)) else 60
-    return max(60, min(amount * unit_seconds, 24 * 3600))
+    if match:
+        amount = int(match.group(1)) if match.group(1) else 1
+        unit = match.group(2).lower()
+        per = 86400 if unit.startswith("d") else 3600 if unit.startswith("h") else 60
+        return max(60, min(amount * per, IGNORE_MAX_SECONDS))
+    if IGNORE_LONG_RE.search(text):
+        return IGNORE_MAX_SECONDS
+    return IGNORE_DEFAULT_SECONDS
+
+
+def _describe_duration(seconds):
+    """So the confirmation states the duration she actually set. "for a little
+    while" was true of 30 minutes and equally true of the 30 minutes someone
+    got after asking for a whole day -- the wording covered the mismatch
+    instead of exposing it."""
+    if seconds >= 86400:
+        return "a whole day"
+    if seconds >= 3600:
+        hours = round(seconds / 3600)
+        return "an hour" if hours == 1 else f"{hours} hours"
+    minutes = round(seconds / 60)
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
 
 
 # Words that ride along with a target's name in a real command and will
@@ -439,9 +464,23 @@ def _match_name(members, candidate):
             value = getattr(member, attr, None)
             if value and value.lower() == candidate:
                 return member
-    for member in members:  # partial, e.g. "shingai" inside a decorated nick
-        if candidate in (member.display_name or "").lower():
-            return member
+    # Partial, for a name buried in a decorated nick ("shingai 🌙ゼーレ").
+    # _resolve_member now feeds in single words, so a plain substring test is
+    # dangerous: "er" matches inside "CamperOnDuty" and mutes a bystander.
+    # Require the match to start a name -- at the string start, after a
+    # separator, or on a camelCase hump ("alaska" in "BakedAlaska201") --
+    # and be long enough to mean something.
+    if len(candidate) < 3:
+        return None
+    for member in members:
+        name = member.display_name or ""
+        low = name.lower()
+        at = low.find(candidate)
+        while at != -1:
+            before = name[at - 1] if at else ""
+            if not before or not before.isalnum() or name[at].isupper():
+                return member
+            at = low.find(candidate, at + 1)
     return None
 
 
@@ -518,7 +557,7 @@ async def handle_ignore_command(message, text):
         seconds = _parse_ignore_duration(text)
         ignored_until[target.id] = time.time() + seconds
         print(f"[ignore] {message.author.display_name} muted {target.display_name} for {seconds}s")
-        return f"okay, i won't answer {target.display_name} for a little while~"
+        return f"okay, i won't answer {target.display_name} for {_describe_duration(seconds)}~"
 
     return None
 
