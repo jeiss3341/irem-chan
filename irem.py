@@ -716,12 +716,11 @@ GIF_SAMPLE_FRAMES = 3  # animated GIFs aren't a supported Gemini mime type, so w
                         # PNGs instead of just handing over the raw file
 
 
-def gif_sample_frames_png(data, max_frames=GIF_SAMPLE_FRAMES):
-    """Decode an animated GIF into up to max_frames PNG snapshots spread evenly
-    across the animation (first/middle/last), since Gemini has no GIF support
-    but does support PNG — this at least gives it a sense of motion instead of
-    a single static frame."""
-    im = Image.open(io.BytesIO(data))
+def sample_frames_png(im, max_frames=GIF_SAMPLE_FRAMES):
+    """Snapshot up to max_frames evenly-spaced frames of an already-opened
+    animated image (first/middle/last) as plain PNGs. Shared by GIFs, which
+    Gemini can't read at all, and by animated PNG/WebP, which it reads
+    unreliably — a few still frames give it a sense of motion either way."""
     n_frames = getattr(im, "n_frames", 1)
     if n_frames <= 1:
         indices = [0]
@@ -735,6 +734,11 @@ def gif_sample_frames_png(data, max_frames=GIF_SAMPLE_FRAMES):
         im.convert("RGB").save(buf, format="PNG")
         frames.append(buf.getvalue())
     return frames
+
+
+def gif_sample_frames_png(data, max_frames=GIF_SAMPLE_FRAMES):
+    """sample_frames_png for raw GIF bytes."""
+    return sample_frames_png(Image.open(io.BytesIO(data)), max_frames)
 
 
 MAX_VIDEO_BYTES = 40 * 1024 * 1024  # videos commonly exceed the 15MB image/gif
@@ -766,8 +770,36 @@ def media_bytes_to_parts(data, content_type, source="unknown"):
             parts = []
         parts.extend({"inline_data": {"mime_type": "image/png", "data": f}} for f in frames)
         return parts
-    if content_type.startswith("image/") or content_type.startswith("video/"):
+    if content_type.startswith("video/"):
         return [{"inline_data": {"mime_type": content_type, "data": data}}]
+    if content_type.startswith("image/"):
+        # Re-encode through Pillow instead of forwarding Discord's bytes as-is.
+        # A real sticker came back "400 INVALID_ARGUMENT: Unable to process
+        # input image" -- and a 400 aborts the entire fallback sweep in 0.4s,
+        # so one undecodable picture becomes the canned "i'm sleepy..." line,
+        # which reads as her not understanding it. The same picture as an
+        # ordinary PNG file always worked, so it's the encoding Discord serves,
+        # not the image. Rather than chase which exotic variant it is
+        # (animated PNG, palette quirk, colour profile, embedded metadata),
+        # decode it and hand Gemini a clean baseline PNG every time.
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                fmt, n_frames = im.format, getattr(im, "n_frames", 1)
+                if n_frames > 1:  # animated PNG/WebP -- same treatment as a GIF
+                    frames = sample_frames_png(im)
+                    parts = [{"text": "[frames from an animation someone shared, in order]"}] if len(frames) > 1 else []
+                    parts.extend({"inline_data": {"mime_type": "image/png", "data": f}} for f in frames)
+                    print(f"[media:{source}] {fmt} {n_frames} frames -> {len(frames)} PNG frame(s)")
+                    return parts
+                buf = io.BytesIO()
+                im.convert("RGBA").convert("RGB").save(buf, "PNG")
+                clean = buf.getvalue()
+            print(f"[media:{source}] {fmt} {len(data)}B -> clean PNG {len(clean)}B")
+            return [{"inline_data": {"mime_type": "image/png", "data": clean}}]
+        except Exception as e:
+            print(f"[media:{source}] could not decode {content_type!r} "
+                  f"({len(data)} bytes): {type(e).__name__}: {e}")
+            return []
     print(f"[media:{source}] rejected: unsupported content_type {content_type!r}")
     return []
 
@@ -1051,18 +1083,37 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     # instead of the current one. Popping it here keeps history well-formed —
     # a message that got a canned/no reply is simply absent from her memory,
     # rather than sitting there confusing every reply after it.
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        tools=tools,
+        tool_config=tool_config,
+    )
     try:
-        response = await asyncio.to_thread(
-            generate_content_with_fallback,
-            contents=list(convo),
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                tools=tools,
-                tool_config=tool_config,
-            ),
-        )
+        try:
+            response = await asyncio.to_thread(
+                generate_content_with_fallback, contents=list(convo), config=config)
+        except genai_errors.APIError as e:
+            # A 400 aborts the whole fallback sweep in under half a second, and
+            # the 400 that actually happens in production is "Unable to process
+            # input image" on a Discord sticker. So one picture Gemini can't
+            # decode costs her the entire reply and she answers with the canned
+            # tired line -- which reads as her not understanding the picture,
+            # when she never got to see or answer anything. Drop the media and
+            # answer the words instead: telling someone honestly that it didn't
+            # open is a real reply, and "i'm sleepy" is not.
+            if e.code != 400 or not image_parts:
+                raise
+            print(f"[gemini] 400 with media attached, retrying without it: {str(e)[:140]}")
+            convo[-1] = {"role": "user", "parts": [{"text":
+                "(a friend shared an image, GIF, or video but it wouldn't open on your side "
+                "— you did NOT receive it and cannot see it at all, so say so honestly and "
+                "maybe ask them to send it again, instead of reacting like you saw it) "
+                + user_text}]}
+            image_parts = None
+            response = await asyncio.to_thread(
+                generate_content_with_fallback, contents=list(convo), config=config)
         reply = (response.text or "").strip()
         if image_parts:
             # confirms whether the forced tool_config is actually making her
