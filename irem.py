@@ -936,12 +936,16 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         # it lacks; supplying the knowledge does (see docs/todo.md on the
         # character roster). Keep this to the behaviour that actually needs
         # stating and let the roster do the real work.
-        system += ("\n\nThis message includes an image, GIF, or video — look at it and react to "
-                   "what's really there, in your own short, childlike voice. Never describe it "
-                   "clinically or caption it, just react like a friend would. If you don't "
-                   "actually recognise who or what it is, say so or ask — react to what you can "
-                   "see rather than naming it. A confident wrong name is worse than not knowing. "
-                   "Never mention searching or where you learned something.")
+        system += ("\n\nThis message includes an image, GIF, or video. Before you answer, work "
+                   "out the MOOD — what it's really saying, and what the person sharing it is "
+                   "feeling right now. People share pictures for how they FEEL, not for the "
+                   "objects in them, and the joke or the point usually lives in the mood rather "
+                   "than the details. Then answer in ONE short line, in your own childlike "
+                   "voice, responding to that feeling like a friend who noticed. Don't just "
+                   "narrate what's in the picture and never caption it clinically. If you don't "
+                   "recognise who or what it is, say so or ask rather than naming it — a "
+                   "confident wrong name is worse than not knowing. Never mention searching or "
+                   "where you learned something.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
