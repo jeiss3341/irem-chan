@@ -64,6 +64,24 @@ FALLBACK_MODELS = [
     "gemini-3.1-flash-lite",  # ~500/day
 ]
 ALL_MODEL_TIERS = MODEL_CANDIDATES + FALLBACK_MODELS
+
+# Hidden reasoning is billed against max_output_tokens, and it CANNOT be
+# switched off: 3.6-flash and 3.5-flash-lite reject thinking_config outright
+# with a 400, so _call_model strips it and they run on default thinking, and
+# even where thinking_budget=0 IS accepted 3.8-flash still spent 132 tokens
+# on it. Measured, with the config stripped, on a real image:
+#
+#     3.7-flash 325    3.6-flash 335    3.5-flash 507    3.8-flash 400+
+#
+# The cap was 400. So 3.5-flash could never answer at all -- it finished on
+# MAX_TOKENS with an empty or garbled reply every single time it came up, and
+# an empty reply is treated as a failed call, which surfaces as the canned
+# "i'm sleepy..." line. Indistinguishable from her not understanding.
+#
+# Replies themselves are 11-19 tokens even when handed 2000 to play with, so
+# the headroom costs nothing and doesn't make her ramble -- the free tier
+# bills requests per day, not tokens.
+MAX_OUTPUT_TOKENS = 1200
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
 # reasoning for a one-line reply
 
@@ -1035,7 +1053,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             contents=list(convo),
             config=types.GenerateContentConfig(
                 system_instruction=system,
-                max_output_tokens=400,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
                 tools=tools,
                 tool_config=tool_config,
