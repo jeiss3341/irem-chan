@@ -399,8 +399,14 @@ IGNORE_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 UNIGNORE_CMD_RE = re.compile(
-    r"\b(?:unignore|stop\s+ignoring|you\s+can\s+(?:talk|reply|respond)\s+to)\s+(.+)",
+    r"\b(?:unignore|stop\s+ignoring|(?:you|u)\s+can\s+(?:talk|reply|respond|answer)\s+to)\s+(.+)",
     re.IGNORECASE,
+)
+# "talk to shingai again" -- the natural way to lift it without ever using the
+# word "unignore". Without this the mute can only be waited out, which is a
+# nasty asymmetry: the order lands instantly and then won't come off.
+UNIGNORE_AGAIN_RE = re.compile(
+    r"\b(?:talk|reply|respond|answer)\s+to\s+(.+?)\s+again\b", re.IGNORECASE,
 )
 # "for 10 minutes" / "for an hour" / "for 2h" tacked onto either command
 IGNORE_DURATION_RE = re.compile(
@@ -415,6 +421,16 @@ def _parse_ignore_duration(text):
     amount = int(match.group(1)) if match.group(1) else 1
     unit_seconds = 3600 if match.group(2).lower().startswith(("h",)) else 60
     return max(60, min(amount * unit_seconds, 24 * 3600))
+
+
+# Words that ride along with a target's name in a real command and will
+# never match a member: her own name, politeness, filler. The full phrase is
+# always tried before these are stripped, so multi-word display names survive.
+COMMAND_FILLER = {
+    "irem", "iremchan", "chan", "please", "pls", "plz", "thanks", "thank",
+    "thx", "ty", "ok", "okay", "now", "u", "you", "can", "could", "would",
+    "just", "the", "to", "a", "bit", "little", "while", "and", "again",
+}
 
 
 def _match_name(members, candidate):
@@ -434,6 +450,15 @@ async def _resolve_member(message, text):
     otherwise by name. Real usage is a bare name ("ignore shingai"), not a
     ping, so name matching isn't optional.
 
+    Names arrive with extra words stuck to them far more often than not.
+    "can u ignore shingai irem" — calling her by name, the way anyone
+    actually talks to her — handed this "shingai irem", which matches no
+    member, so the command silently fell through to a normal model reply:
+    she said "okay!" and went right on answering Shingai. Same for a
+    trailing "please". So the phrase is tried whole first (multi-word
+    display names like "Ms Luci" need that) and then word by word, skipping
+    the filler that shows up in real messages.
+
     The members intent isn't enabled, so guild.members only holds whoever
     happens to be cached; query_members asks the gateway directly and works
     without the privileged intent, which keeps this from silently failing on
@@ -441,17 +466,28 @@ async def _resolve_member(message, text):
     for user in message.mentions:
         if user != client.user:
             return user
-    candidate = re.split(r"\bfor\b", text, 1)[0].strip(" .,!?'\"").lower()
+    candidate = re.split(r"\bfor\b", text, maxsplit=1)[0].strip(" .,!?'\"").lower()
     if not candidate:
         return None
-    found = _match_name(message.guild.members, candidate)
-    if found:
-        return found
-    try:
-        return _match_name(await message.guild.query_members(query=candidate, limit=5), candidate)
-    except (discord.HTTPException, asyncio.TimeoutError) as e:
-        print(f"[ignore] member lookup failed for {candidate!r}: {e}")
-        return None
+    attempts = [candidate] + [w for w in re.findall(r"[\w'-]+", candidate)
+                              if w not in COMMAND_FILLER and w != candidate]
+    # Every attempt against the cache before any of them hit the gateway --
+    # otherwise a three-word phrase costs three network round trips before it
+    # reaches the word that was always going to match.
+    for cand in attempts:
+        found = _match_name(message.guild.members, cand)
+        if found and found != client.user:
+            return found
+    for cand in attempts:
+        try:
+            members = await message.guild.query_members(query=cand, limit=5)
+        except (discord.HTTPException, asyncio.TimeoutError) as e:
+            print(f"[ignore] member lookup failed for {cand!r}: {e}")
+            continue
+        found = _match_name(members, cand)
+        if found and found != client.user:
+            return found
+    return None
 
 
 async def handle_ignore_command(message, text):
@@ -465,7 +501,7 @@ async def handle_ignore_command(message, text):
     if message.author.id not in DEEP_CONNECTIONS:
         return None
 
-    unignore = UNIGNORE_CMD_RE.search(text)
+    unignore = UNIGNORE_CMD_RE.search(text) or UNIGNORE_AGAIN_RE.search(text)
     if unignore:
         target = await _resolve_member(message, unignore.group(1))
         if target is None:
