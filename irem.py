@@ -822,11 +822,24 @@ async def fetch_media_bytes(url, max_bytes=MAX_MEDIA_BYTES):
                 if resp.content_length and resp.content_length > max_bytes:
                     print(f"[media:embed] rejected: content-length {resp.content_length} > {max_bytes} for {url}")
                     return None, None
-                data = await resp.content.read(max_bytes + 1)
-                if len(data) > max_bytes:
-                    print(f"[media:embed] rejected: body exceeded {max_bytes} bytes for {url}")
-                    return None, None
-                return data, resp.content_type
+                # Read to EOF in chunks. This used to be a single
+                # resp.content.read(max_bytes + 1), which looks like "read the
+                # whole body, capped" but is not: aiohttp's read(n) returns
+                # whatever is already buffered, up to n, so anything that
+                # didn't arrive in the first buffer was silently CUT OFF. It
+                # produced a real, plausible-looking PNG prefix -- 18168 bytes
+                # of one -- which Pillow rejects as "image file is truncated"
+                # and Gemini rejects as "400: Unable to process input image".
+                # Every fetched sticker, custom emote and Tenor GIF went
+                # through this. Local tests never caught it because they load
+                # files from disk and never touch this path at all.
+                data = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    data.extend(chunk)
+                    if len(data) > max_bytes:
+                        print(f"[media:embed] rejected: body exceeded {max_bytes} bytes for {url}")
+                        return None, None
+                return bytes(data), resp.content_type
     except asyncio.TimeoutError:
         print(f"[media:embed] fetch timed out after {MEDIA_FETCH_TIMEOUT.total}s for {url}")
         return None, None
