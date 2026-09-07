@@ -164,22 +164,24 @@ IREM_APPEARANCE = (
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
 # reasoning for a one-line reply
 
-# (client, model) combos flattened into one rotating "slot" index, KEY-major:
-# slot = client_index * len(ALL_MODEL_TIERS) + model_tier_index.
+# (client, model) combos flattened into one rotating "slot" index, MODEL-major:
+# slot = model_tier_index * len(_gemini_clients) + client_index.
 #
-# Key-major specifically because the daily pool is shared across keys but NOT
-# across models (see above). When 3.8 dies on one key it's dead on all of
-# them, so walking the other 9 keys first would be 9 guaranteed-wasted round
-# trips before reaching 3.7, which actually still has a full pool. This way
-# the first len(ALL_MODEL_TIERS) attempts cover every genuinely distinct pool
-# there is -- finding a live model in ~2s instead of ~18s of grinding through
-# already-dead ones. The remaining slots (same models on other keys) are
-# still tried before giving up, so nothing is lost if the shared-pool theory
-# turns out to be wrong.
+# Model-major because the daily quota is genuinely PER KEY. Measured directly:
+# with key #7 drained on gemini-3.8-flash, the other nine keys all answered on
+# that same model, and the 429 names its own limit
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier". Per project, not per
+# account.
 #
-# Every new day still starts at the TOP of the tier list (3.8-flash) and
-# walks down as each model drains, with WHICH KEY leads rotating daily
-# (today's ordinal mod the key count).
+# So every key holds a separate ~20/day pool of the BEST model, and the right
+# order is to spend all ten of those before dropping a tier. Key-major would
+# fall to 3.7 after 20 requests while 180 requests of 3.8 sat unused on the
+# other keys -- trading quality away for nothing.
+#
+# Real ceiling: 10 keys x (5 Flash x ~20 + 2 Lite x ~500) = ~11,000/day.
+#
+# Every new day starts at the TOP of the tier list (3.8-flash), with WHICH KEY
+# leads rotating daily so the same one isn't always spent first.
 _TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(ALL_MODEL_TIERS)
 _active_gemini_slot = 0
 _active_gemini_day = None  # forces the first call of the process to compute today's start slot
@@ -205,7 +207,7 @@ def format_ambient_context(channel_id):
 
 
 def _slot_to_client_and_model(slot):
-    client_index, model_index = divmod(slot, len(ALL_MODEL_TIERS))
+    model_index, client_index = divmod(slot, len(_gemini_clients))
     return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
@@ -287,10 +289,8 @@ def generate_content_with_fallback(**kwargs):
     global _active_gemini_slot, _active_gemini_day
     today = datetime.datetime.now().date()
     if today != _active_gemini_day:
-        # key-major layout, so the start of a key's block is model_index 0
-        # (3.8-flash) -- always start the day on the best model, with a
-        # different key leading each day
-        _active_gemini_slot = (today.toordinal() % len(_gemini_clients)) * len(ALL_MODEL_TIERS)
+        # model_index 0 (3.8-flash), with the leading key rotating by date
+        _active_gemini_slot = today.toordinal() % len(_gemini_clients)
         _active_gemini_day = today
 
     last_error = None
