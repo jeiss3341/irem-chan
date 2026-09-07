@@ -83,6 +83,45 @@ ALL_MODEL_TIERS = MODEL_CANDIDATES + FALLBACK_MODELS
 # bills requests per day, not tokens.
 MAX_OUTPUT_TOKENS = 1200
 
+# Models that reject thinking_config (3.6-flash, 3.5-flash-lite) get it
+# stripped by _call_model and then run on default thinking -- and some of them
+# emit that reasoning as ORDINARY OUTPUT TEXT rather than as thought parts. It
+# went straight to Discord as her reply: "special instructions: ... drafting
+# response: ... options: ... let's refine:", quoting her own system prompt in
+# public. Raising max_output_tokens to 1200 made this worse rather than
+# better, because the dump used to be truncated into an empty reply instead.
+#
+# She always answers in ONE short line, so bullets, several paragraphs, or
+# planning vocabulary are a scratchpad, not her talking.
+REASONING_LEAK_RE = re.compile(
+    r"\bspecial instructions?\b"
+    r"|\bdraft(?:ing)?\s+(?:a\s+)?response\b"
+    r"|\blet'?s\s+refine\b"
+    r"|\bfor this reply specifically\b"
+    r"|\bthe user (?:sent|is|wants|asked|said)\b"
+    r"|^\s*options?\s*:\s*$"
+    r"|^\s*[-*\u2022]\s+",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def looks_like_reasoning(text):
+    if not text:
+        return False
+    if REASONING_LEAK_RE.search(text):
+        return True
+    return text.count("\n") >= 3 or len(text) > 600
+
+
+def skip_active_gemini_slot(why):
+    """Move off the current (key, model) slot. generate_content_with_fallback
+    sticks to whichever slot last succeeded, so a model returning a
+    technically-successful but unusable response would otherwise keep being
+    picked for every message after it."""
+    global _active_gemini_slot
+    _active_gemini_slot = (_active_gemini_slot + 1) % _TOTAL_GEMINI_SLOTS
+    print(f"[gemini] moving off slot: {why}")
+
 # What she looks like, injected ONLY when there's an image attached (see
 # ask_irem). People share art, emotes and stickers of her constantly and
 # expect her to know herself, and she cannot -- Gemini has never seen this
@@ -1001,7 +1040,7 @@ async def extract_image_parts(message):
     return parts
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None):
+async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False):
     convo = history[channel_id]
     parts = [{"text": user_text}]
     if image_parts:
@@ -1032,6 +1071,13 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    "confident wrong name is worse than not knowing. Never mention searching or "
                    "where you learned something.")
         system += IREM_APPEARANCE
+        if emote_aside:
+            system += ("\n\nFor THIS message though: the picture here is a custom EMOTE used "
+                       "inside their sentence, the way people use emoji — it's tone and "
+                       "decoration, not what the message is about. Reply to what they actually "
+                       "SAID. Let the emote colour how you take it, but don't make the emote "
+                       "the topic, and don't talk about yourself just because you're in it. If "
+                       "they're talking about another person, you're talking about that person.")
     if author_id in DEEP_CONNECTIONS:
         name = DEEP_CONNECTIONS[author_id]
         system += (f"\n\nYou remember {name} well — one of your deep connections, someone "
@@ -1169,6 +1215,19 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             response = await asyncio.to_thread(
                 generate_content_with_fallback, contents=list(convo), config=config)
         reply = (response.text or "").strip()
+        if looks_like_reasoning(reply):
+            # Never send this. Move to a different model and ask again; if the
+            # next one does it too, fall through to the canned line, which is
+            # at least in character.
+            print(f"[gemini] reasoning leaked into the reply ({len(reply)} chars), retrying: "
+                  f"{reply[:110]!r}")
+            skip_active_gemini_slot("reasoning leaked into the reply")
+            response = await asyncio.to_thread(
+                generate_content_with_fallback, contents=list(convo), config=config)
+            reply = (response.text or "").strip()
+            if looks_like_reasoning(reply):
+                print("[gemini] second model leaked too, dropping the reply")
+                reply = ""
         if image_parts:
             # confirms whether the forced tool_config is actually making her
             # search, vs silently getting stripped by _call_model's 400
@@ -1260,6 +1319,18 @@ async def on_message(message):
         message.attachments or message.embeds or message.stickers
         or CUSTOM_EMOJI_RE.search(message.content)
     )
+    # A custom emote dropped into a sentence is punctuation, not the subject.
+    # "he is a chud <:irem_shock:>" is a message about a person, and she was
+    # answering the emote instead -- "that's just me being a big round sleepy
+    # kitty!" -- which got worse once she started recognising herself in them.
+    # A real attachment or sticker usually IS the subject, so only messages
+    # whose sole media is an emote, and which actually say something, get the
+    # emote demoted to tone.
+    emote_aside = bool(
+        CUSTOM_EMOJI_RE.search(message.content)
+        and not (message.attachments or message.embeds or message.stickers)
+        and CUSTOM_EMOJI_RE.sub("", prompt).strip()
+    )
     if media_was_shared and not image_parts:
         # Something WAS shared, but extraction found nothing usable (an
         # unsupported format, a fetch failure, an oversized file, an embed
@@ -1342,7 +1413,7 @@ async def on_message(message):
         fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
                     else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
             if not reply:
                 reply = fallback
         except Exception as e:
@@ -1360,7 +1431,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -1373,7 +1444,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -1390,7 +1461,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx)
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:
