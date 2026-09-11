@@ -7,6 +7,7 @@ import re
 import time
 
 import aiohttp
+import httpx
 import discord
 from PIL import Image
 from dotenv import load_dotenv
@@ -28,7 +29,22 @@ i = 2
 while os.environ.get(f"GEMINI_API_KEY_{i}"):
     _gemini_keys.append(os.environ[f"GEMINI_API_KEY_{i}"])
     i += 1
-_gemini_clients = [genai.Client(api_key=k) for k in _gemini_keys]
+# Every request gets a hard ceiling, and the SDK's own retries are switched
+# off. With the defaults, ONE overloaded request hung for 355s in production
+# (22:51 on 2026-09-10) and 271s locally before surfacing a 503, because the
+# library quietly retried with backoff inside what looked like a single
+# attempt. An overloaded model is better abandoned for the next one than
+# waited on. Video gets longer (see ask_irem): a normal 800KB clip took 40s.
+GEMINI_CALL_TIMEOUT_MS = 30_000
+GEMINI_VIDEO_TIMEOUT_MS = 90_000
+GEMINI_REPLY_DEADLINE = 75  # seconds for one reply, every attempt combined
+_gemini_clients = [
+    genai.Client(api_key=k, http_options=types.HttpOptions(
+        timeout=GEMINI_CALL_TIMEOUT_MS,
+        retry_options=types.HttpRetryOptions(attempts=1),
+    ))
+    for k in _gemini_keys
+]
 print(f"[gemini] loaded {len(_gemini_clients)} API key(s)")  # the key-loading loop
 # above stops silently at the first missing GEMINI_API_KEY_N, so a typo'd or
 # gapped env var on the host would otherwise show no error at all -- just a
@@ -36,13 +52,14 @@ print(f"[gemini] loaded {len(_gemini_clients)} API key(s)")  # the key-loading l
 # in deploy logs on every startup instead of only discoverable by noticing one
 # key doing all the work in the AI Studio dashboard.
 
-# Free-tier RPD is ~20/day per model (500/day for the Lite tiers). Evidence
-# from a full day of live testing says that pool is shared across the whole
-# ACCOUNT, not per project -- 10 distinct keys in 10 distinct properly
-# provisioned projects all 429'd on gemini-3.8-flash within the same second,
-# and one project's dashboard read 22/20, over a supposedly hard per-project
-# cap. So extra keys multiply nothing; only extra MODELS add real capacity,
-# since each model has its own separate pool.
+# Free-tier RPD is ~20/day per model (500/day for the Lite tiers), and it is
+# PER KEY -- each key's project has its own pool of each model. Measured on
+# 2026-09-07: with one key drained on gemini-3.8-flash, the other nine all
+# answered on that model in the same second, and the 429 names its limit
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier". (An earlier note here
+# claimed the pool was account-wide. That was inferred from search grounding
+# 429ing on every key at once -- grounding has its own quota, which does
+# behave that way; the model quotas don't.)
 #
 # Priority order, best quality first, walking down as each one drains:
 # current-gen Flash tiers, then last-gen Flash, then the Lite tiers (much
@@ -113,14 +130,16 @@ def looks_like_reasoning(text):
     return text.count("\n") >= 3 or len(text) > 600
 
 
-def skip_active_gemini_slot(why):
-    """Move off the current (key, model) slot. generate_content_with_fallback
-    sticks to whichever slot last succeeded, so a model returning a
-    technically-successful but unusable response would otherwise keep being
-    picked for every message after it."""
-    global _active_gemini_slot
-    _active_gemini_slot = (_active_gemini_slot + 1) % _TOTAL_GEMINI_SLOTS
-    print(f"[gemini] moving off slot: {why}")
+def bench_last_used_model(why, seconds=600):
+    """Take the model that produced the last reply out of rotation for a while.
+    Used by the reasoning-leak guard: the leak is a property of the model
+    (the ones that reject thinking_config), so retrying the same model on
+    another key would just leak again."""
+    if _last_used is None:
+        return
+    model, _ = _last_used
+    _model_benched_until[model] = time.time() + seconds
+    print(f"[gemini] benching {model} for {seconds}s: {why}")
 
 # What she looks like, injected ONLY when there's an image attached (see
 # ask_irem). People share art, emotes and stickers of her constantly and
@@ -164,27 +183,37 @@ IREM_APPEARANCE = (
 # thinking is capped to 0 in ask_irem so it doesn't burn tokens on hidden
 # reasoning for a one-line reply
 
-# (client, model) combos flattened into one rotating "slot" index, MODEL-major:
-# slot = model_tier_index * len(_gemini_clients) + client_index.
+# How a reply picks its (model, key). Every reply walks the same order from
+# the TOP: every key on 3.8-flash, then every key on 3.7-flash, and so on --
+# the order jeiss asked for ("use all the keys using flash 3.8, and then it
+# goes down to 3.7 3.6 and 3.5"). Which key leads each tier rotates by date.
 #
-# Model-major because the daily quota is genuinely PER KEY. Measured directly:
-# with key #7 drained on gemini-3.8-flash, the other nine keys all answered on
-# that same model, and the 429 names its own limit
-# "GenerateRequestsPerDayPerProjectPerModel-FreeTier". Per project, not per
-# account.
+# Anything known to be dead is skipped without a network call, so walking
+# from the top costs nothing extra. There are two kinds of dead, because they
+# fail differently:
 #
-# So every key holds a separate ~20/day pool of the BEST model, and the right
-# order is to spend all ten of those before dropping a tier. Key-major would
-# fall to 3.7 after 20 requests while 180 requests of 3.8 sat unused on the
-# other keys -- trading quality away for nothing.
+#   quota -- a 429 benches only THAT key's pool of that model. Quota is per
+#            key, so the same model on the next key is still worth trying.
+#   load  -- a 503 or a timeout is Google short on capacity for the MODEL,
+#            on every key at once. The rest of that model's keys are skipped
+#            rather than each hung on in turn (the old walk tried 3.7-flash on
+#            keys 1, 2, 3, 4, 5, 6 in a row, one overloaded request each).
+#
+# This replaces a "sticky slot" that remembered wherever the last success
+# was. That one both started each day at a single spot in a flat list (on
+# days whose lead key was #10, the first failure dropped straight to 3.7
+# with nine keys of 3.8 untouched) and never climbed back after a transient
+# failure, so one 503 could park her on a weaker, overloaded model all day.
 #
 # Real ceiling: 10 keys x (5 Flash x ~20 + 2 Lite x ~500) = ~11,000/day.
-#
-# Every new day starts at the TOP of the tier list (3.8-flash), with WHICH KEY
-# leads rotating daily so the same one isn't always spent first.
-_TOTAL_GEMINI_SLOTS = len(_gemini_clients) * len(ALL_MODEL_TIERS)
-_active_gemini_slot = 0
-_active_gemini_day = None  # forces the first call of the process to compute today's start slot
+_pair_benched_until = {}   # (model, key_index) -> unix time usable again
+_model_benched_until = {}  # model -> unix time usable again
+_last_used = None          # (model, key_index) behind the most recent reply
+QUOTA_DAY_BENCH = 3600     # re-checked hourly: a wasted 429 costs ~0.2s, and
+                           # it heals itself whenever Google's day rolls over
+QUOTA_MINUTE_BENCH = 60
+LOAD_BENCH = 90
+OTHER_BENCH = 3600
 history = defaultdict(lambda: deque(maxlen=50))
 
 # TEMPORARY stopgap until the real memory system exists (see docs/todo.md):
@@ -204,11 +233,6 @@ def format_ambient_context(channel_id):
     if not entries:
         return None
     return "\n".join(f"{name}: {text}" for name, text in entries)
-
-
-def _slot_to_client_and_model(slot):
-    model_index, client_index = divmod(slot, len(_gemini_clients))
-    return _gemini_clients[client_index], ALL_MODEL_TIERS[model_index], client_index
 
 
 # Config fields that some models reject outright with a 400 (confirmed live
@@ -273,67 +297,91 @@ def _call_model(client, model, kwargs):
     return client.models.generate_content(model=model, **attempt_kwargs)
 
 
+def _walk_order():
+    n = len(_gemini_clients)
+    lead = datetime.date.today().toordinal() % n
+    for model in ALL_MODEL_TIERS:
+        for i in range(n):
+            yield model, (lead + i) % n
+
+
+def _quota_bench_seconds(e):
+    """A per-day 429 means that key's pool of that model is spent; the 5/min
+    per-minute limit clears in about a minute. The 429 says which."""
+    details = e.details.get("error", {}).get("details", []) if isinstance(e.details, dict) else []
+    for detail in details:
+        for violation in detail.get("violations", []) or []:
+            quota_id = violation.get("quotaId", "")
+            if "PerDay" in quota_id:
+                return QUOTA_DAY_BENCH
+            if "PerMinute" in quota_id:
+                return QUOTA_MINUTE_BENCH
+    return QUOTA_MINUTE_BENCH
+
+
 def generate_content_with_fallback(**kwargs):
-    """Like gemini.models.generate_content, but on a 429 (quota exhausted) or
-    a 5xx (transient server-side issue, e.g. "model overloaded") rotates to
-    the next (key, model) slot and retries, instead of failing the whole
-    reply outright. A different slot is a different key/model pairing, so
-    it's a reasonable thing to try for a transient server error too, not
-    just quota. Any other error (bad request, auth, etc.) raises immediately
-    — a different slot is very unlikely to fix a malformed request itself.
-    Raises the last error if every slot is exhausted. `model` must not be
-    passed in kwargs — this function owns it.
-
-    Each new day always starts back at the 3.8-flash tier, just with a
-    different key leading (see the comment above _TOTAL_GEMINI_SLOTS)."""
-    global _active_gemini_slot, _active_gemini_day
-    today = datetime.datetime.now().date()
-    if today != _active_gemini_day:
-        # model_index 0 (3.8-flash), with the leading key rotating by date
-        _active_gemini_slot = today.toordinal() % len(_gemini_clients)
-        _active_gemini_day = today
-
+    """Like gemini.models.generate_content, but walks (model, key) pairs best
+    model first (see the comment above _pair_benched_until), skipping anything
+    known to be dead, until one answers or GEMINI_REPLY_DEADLINE passes. Only
+    a 400 aborts outright -- a malformed request is malformed everywhere.
+    `model` must not be passed in kwargs -- this function owns it."""
+    global _last_used
+    started = time.monotonic()
     last_error = None
-    start_slot = _active_gemini_slot
-    call_started = time.monotonic()
-    for offset in range(_TOTAL_GEMINI_SLOTS):
-        slot = (start_slot + offset) % _TOTAL_GEMINI_SLOTS
-        client, model, client_index = _slot_to_client_and_model(slot)
-        attempt_started = time.monotonic()
-        try:
-            response = _call_model(client, model, kwargs)
-            _active_gemini_slot = slot  # stick here for the rest of today
-            if offset > 0:
-                # only worth logging when it wasn't a clean first-try success —
-                # this is the number to watch for "why did that reply take so
-                # long": total elapsed here times roughly one Google round-trip
-                # per attempt is exactly what a slow reply looks like.
-                print(f"[gemini] succeeded on attempt {offset + 1}/{_TOTAL_GEMINI_SLOTS} "
-                      f"({model} key #{client_index + 1}) after {time.monotonic() - call_started:.1f}s total")
+    attempts = 0
+    for ignore_load in (False, True):
+        # Second pass only if the first found nothing to try at all: load
+        # benches are guesses about a transient state, quota benches aren't.
+        if attempts:
+            break
+        for model, key in _walk_order():
+            now = time.time()
+            if _pair_benched_until.get((model, key), 0) > now:
+                continue
+            if not ignore_load and _model_benched_until.get(model, 0) > now:
+                continue
+            if time.monotonic() - started > GEMINI_REPLY_DEADLINE:
+                print(f"[gemini] giving up after {attempts} attempt(s), "
+                      f"{time.monotonic() - started:.1f}s: past the reply deadline")
+                raise last_error or TimeoutError("Gemini reply deadline passed")
+            attempts += 1
+            attempt_started = time.monotonic()
+            try:
+                response = _call_model(_gemini_clients[key], model, kwargs)
+            except genai_errors.APIError as e:
+                last_error = e
+                took = time.monotonic() - attempt_started
+                if e.code == 400:
+                    print(f"[gemini] {model} on key #{key + 1} failed permanently (400) "
+                          f"after {took:.1f}s, giving up (bad request)")
+                    raise
+                log_gemini_error(e)
+                if e.code == 429:
+                    bench = _quota_bench_seconds(e)
+                    _pair_benched_until[(model, key)] = time.time() + bench
+                    why = "quota (per day)" if bench == QUOTA_DAY_BENCH else "quota (per minute)"
+                elif e.code >= 500:
+                    _model_benched_until[model] = time.time() + LOAD_BENCH
+                    why = f"overloaded, skipping {model} on every key for {LOAD_BENCH}s"
+                else:
+                    _pair_benched_until[(model, key)] = time.time() + OTHER_BENCH
+                    why = f"{e.code}"
+                print(f"[gemini] {model} on key #{key + 1} failed after {took:.1f}s: {why}")
+                continue
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_error = e
+                _model_benched_until[model] = time.time() + LOAD_BENCH
+                print(f"[gemini] {model} on key #{key + 1} {type(e).__name__} after "
+                      f"{time.monotonic() - attempt_started:.1f}s, skipping it on every key "
+                      f"for {LOAD_BENCH}s")
+                continue
+            _last_used = (model, key)
+            if attempts > 1 or time.monotonic() - started > 10:
+                print(f"[gemini] answered by {model} key #{key + 1} on attempt {attempts} "
+                      f"after {time.monotonic() - started:.1f}s total")
             return response
-        except genai_errors.APIError as e:
-            last_error = e
-            attempt_elapsed = time.monotonic() - attempt_started
-            # Only a 400 aborts the whole sweep: after _call_model's config
-            # strips, a 400 means the request itself is malformed, and it'll
-            # be malformed identically on every other slot too.
-            #
-            # Everything else moves on. This used to abort on any non-429
-            # under 500, which turned a single dead model into a wall: a
-            # retired model 404ing mid-list ("no longer available to new
-            # users") killed the sweep before it ever reached the Lite tiers
-            # sitting behind it with 500/day pools untouched. A 404 says
-            # nothing about the next model, and a 403 says nothing about the
-            # next key — neither should cost us every remaining option.
-            if e.code == 400:
-                print(f"[gemini] {model} on key #{client_index + 1} failed permanently "
-                      f"({e.code}) after {attempt_elapsed:.1f}s, giving up (bad request)")
-                raise
-            log_gemini_error(e)
-            print(f"[gemini] {model} on key #{client_index + 1} failed ({e.code}) "
-                  f"after {attempt_elapsed:.1f}s, trying next slot")
-    print(f"[gemini] all {_TOTAL_GEMINI_SLOTS} slots exhausted after {time.monotonic() - call_started:.1f}s total")
-    raise last_error
+    print(f"[gemini] nothing answered after {attempts} attempt(s), {time.monotonic() - started:.1f}s")
+    raise last_error or RuntimeError("every Gemini model/key is benched")
 
 # guards against a rapid-fire ping spam burning through Gemini calls while awake
 AWAKE_REPLY_COOLDOWN = 3  # seconds, per person
@@ -1183,7 +1231,12 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
     # instead of the current one. Popping it here keeps history well-formed —
     # a message that got a canned/no reply is simply absent from her memory,
     # rather than sitting there confusing every reply after it.
+    has_video = any(
+        str(part.get("inline_data", {}).get("mime_type", "")).startswith("video/")
+        for part in (image_parts or []) if isinstance(part, dict)
+    )
     config = types.GenerateContentConfig(
+        http_options=types.HttpOptions(timeout=GEMINI_VIDEO_TIMEOUT_MS) if has_video else None,
         system_instruction=system,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
@@ -1221,7 +1274,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             # at least in character.
             print(f"[gemini] reasoning leaked into the reply ({len(reply)} chars), retrying: "
                   f"{reply[:110]!r}")
-            skip_active_gemini_slot("reasoning leaked into the reply")
+            bench_last_used_model("reasoning leaked into the reply")
             response = await asyncio.to_thread(
                 generate_content_with_fallback, contents=list(convo), config=config)
             reply = (response.text or "").strip()
