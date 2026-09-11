@@ -807,6 +807,37 @@ def format_standing_orders():
     )
 
 
+async def _acknowledge_order(message, rule, dropped=None):
+    """Answer a new order in her own voice instead of with a fixed receipt.
+    "okay, i'll remember that from now on: Do not accept food from shingai."
+    is flat and unlike her -- being told off ("bad irem!") deserves a reaction
+    from a child, not a filing confirmation. The rule is already stored, so
+    this is generated with it live in her prompt. It still has to make clear
+    WHICH thing she's agreeing to stop, so an order landing stays visible in
+    Discord and not only in the logs. Falls back to the plain line if the
+    model is unavailable -- losing the confirmation entirely would be worse.
+    """
+    note = ("(someone you trust completely just told you off and gave you a rule to follow "
+            f"from now on: \"{rule}\". Answer in ONE short line, in your own voice. Make it "
+            "clear you understood exactly what you're not allowed to do anymore, naming the "
+            "thing and the person if there is one. You can be sad, pouty, confused, or ask "
+            "why -- you're a child being scolded. Never repeat the rule word for word and "
+            "never mention rules, orders, or being told.)")
+    if dropped:
+        note += (f" (you also forgot an older rule you used to follow: \"{dropped['rule']}\" -- "
+                 "mention that briefly too.)")
+    try:
+        reply = await ask_irem(message.channel.id, note, message.author.id, mood="awake",
+                               author_name=message.author.display_name)
+    except Exception as e:
+        log_gemini_error(e)
+        reply = None
+    if reply:
+        return reply
+    suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
+    return f"okay, i'll remember that from now on: {rule}{suffix}"
+
+
 async def handle_standing_order_command(message, text):
     """Listing, clearing, or taking a new standing order. Deep connections
     only — same reasoning as the ignore command."""
@@ -852,8 +883,7 @@ async def handle_standing_order_command(message, text):
     _save_standing_orders()
     print(f"[orders] {message.author.display_name} added: {rule!r}"
           + (f" (dropped oldest: {dropped['rule']!r})" if dropped else ""))
-    suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
-    return f"okay, i'll remember that from now on: {rule}{suffix}"
+    return await _acknowledge_order(message, rule, dropped)
 
 
 async def handle_ignore_command(message, text):
@@ -1561,7 +1591,8 @@ async def on_message(message):
     # happily agree to an instruction and then ignore it.
     order_reply = await handle_standing_order_command(message, prompt)
     if order_reply:
-        await message.reply(order_reply)
+        # stripped like any other reply -- this one is model-generated now
+        await message.reply(strip_pingable_syntax(order_reply)[:2000].lower())
         return
 
     # The silent path. Every other early return above is "this message isn't
