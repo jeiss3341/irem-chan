@@ -23,40 +23,35 @@ Not started yet.
 
 ## Standing orders from jeiss/neotep
 
-Let jeiss and neotep give her instructions that actually stick — "stop
-saying meow", "be quieter in #general", "talk more" — and have her follow
-them **permanently**, until one of them says otherwise. Not just for the
-next reply, and not just until the channel history rolls over.
+**Built 2026-09-11.** jeiss/neotep can give her instructions that stick, and
+she follows them until told otherwise instead of agreeing sweetly and
+carrying on. Measured before: told "stop saying meow" she said "Okay, I won't
+say it anymore!" and then said Meow three times running; told "no more food
+from shingai" she argued back and thanked him for a cookie a minute later.
 
-That "permanently" is what makes this a real feature rather than a prompt
-tweak: it needs persistence, so it wants the same storage as the memory
-system below (a Railway redeploy currently wipes everything). Worth doing
-both at once rather than standing up storage twice.
+How it works:
 
-Things to decide when building it:
+- `ORDER_HINT_RE` is a cheap gate so ordinary chat never costs an API call.
+  Only messages that look like an instruction reach `_classify_order`, a
+  small JSON pass that decides order vs. comment and rewrites it as one short
+  rule. Keyword matching alone can't separate "stop saying meow" from "haha
+  you never stop saying meow", and a false positive is the bad direction.
+- Rules live in `data/standing_orders.json` and are injected into the system
+  prompt only when the list is non-empty.
+- "what are your rules" lists them; "forget rule 2" and "forget all your
+  rules" remove them. Cap of 10, oldest dropped.
+- She may protest — pout, ask why, call it unfair — but not disobey. Grumbling
+  while obeying is fine; agreeing and then not doing it is not.
+- The cruelty and genuine-concern guardrails from `IREM_SYSTEM_PROMPT` are
+  restated inside the orders block so an order can't quietly erase them.
 
-- **Recognising a command.** Distinguishing "stop saying meow" (an order)
-  from "haha you say meow a lot" (a comment). Probably model judgement in a
-  structured JSON pass rather than keyword matching, similar to the
-  reflection pass below. Getting this wrong in the false-positive direction
-  is worse — she'd silently adopt rules nobody meant to give her.
-- **Scope.** Global, or per-channel? "Be quieter in #general" implies
-  per-channel is at least sometimes wanted.
-- **Listing and revoking.** There has to be a way to see what's currently
-  in force and remove one, or they'll accumulate invisibly and she'll drift
-  for reasons nobody can trace. A cap plus a "what are your rules right
-  now" answer would cover it.
-- **Conflicts.** Later orders should presumably override earlier
-  contradictory ones rather than both sitting in the prompt fighting.
-- **Interaction with the existing guardrail.** `IREM_SYSTEM_PROMPT` already
-  says closeness with deep connections is "not blind agreement" and that
-  she should respond like a caring friend if something seems genuinely
-  worrying, no matter who said it. Standing orders shouldn't quietly erase
-  that.
+This also needed `author_name` in `ask_irem`. The model never learned who was
+speaking, so a rule naming a person could not fire at all — with the shingai
+rule loaded she still answered "Yay, thank you so much!" to his cookie.
 
-Only jeiss/neotep (`DEEP_CONNECTIONS`) should be able to set these.
-
-Not started yet.
+**Remaining:** Railway wipes the container filesystem on redeploy, so rules
+survive restarts but not deploys. Mounting a volume at `IREM_DATA_DIR` makes
+them permanent — the same storage the memory system below will want.
 
 ## Character roster so she can name what she sees
 

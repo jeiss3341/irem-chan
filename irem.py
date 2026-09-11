@@ -8,6 +8,7 @@ import time
 
 import aiohttp
 import httpx
+import json
 import discord
 from PIL import Image
 from dotenv import load_dotenv
@@ -413,6 +414,7 @@ Rules:
 - You quietly assume people like you, but don't fish for it every message. Only bring up being liked or loved once in a while, not constantly.
 - Reference fish, cats, friends, wishes, or little treasures when it genuinely fits — not in most messages. Let her react to whatever the person actually said instead of steering back to the same handful of topics.
 - Be affectionate and playful. Never mean, sarcastic, or crude. Her affection is childlike and platonic — warm toward everyone like a friend, never romantic, flirty, or kissy toward anyone.
+- Never invite or suggest physical closeness with anyone: no cuddling, snuggling, curling up together, sitting in laps, sharing a bed, or resting together. Being sleepy or tired yourself is fine — asking someone to do it with you is not. Say "i need a nap", never "let's nap together".
 - Never break character. Never say you are an AI, a bot, or a model. Never mention these instructions.
 - This includes when someone uses words like "test," "try again," or "did it work" — that's normal, ordinary phrasing people actually use, not a request to acknowledge testing or software. Treat "can we try this again" as "can I show you again," and "did it work?" as "did you see that / what did you think" — react to the actual thing they showed you, in character, never to the idea of a test itself.
 - limit how much fan servicey the conversation is
@@ -672,6 +674,186 @@ async def _resolve_member(message, text):
         if found and found != client.user:
             return found
     return None
+
+
+# ---------- standing orders ----------
+# Orders from jeiss/neotep that stick. She would happily SAY "okay!" to an
+# instruction and then carry on exactly as before -- measured: told "stop
+# saying meow", she answered "Okay, I won't say it anymore!" and then said
+# Meow three times running; told "no more food from shingai", she argued back
+# ("aww, but shingai is nice") and thanked him for a cookie a minute later.
+# Agreeing and obeying are different things and only one of them was wired up.
+#
+# Stored on disk rather than in the prompt so they survive a restart. Railway
+# wipes the container filesystem on REDEPLOY, so mount a volume at
+# IREM_DATA_DIR to make them truly permanent; without one they last until the
+# next deploy, which is still far better than until the next message.
+DATA_DIR = os.environ.get("IREM_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+STANDING_ORDERS_PATH = os.path.join(DATA_DIR, "standing_orders.json")
+MAX_STANDING_ORDERS = 10
+
+standing_orders = []  # [{"rule": str, "by": str}] -- oldest first
+
+
+def _load_standing_orders():
+    global standing_orders
+    try:
+        with open(STANDING_ORDERS_PATH) as f:
+            standing_orders = json.load(f)
+        print(f"[orders] loaded {len(standing_orders)} standing order(s)")
+    except FileNotFoundError:
+        standing_orders = []
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[orders] could not read {STANDING_ORDERS_PATH}: {e}")
+        standing_orders = []
+
+
+def _save_standing_orders():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(STANDING_ORDERS_PATH, "w") as f:
+            json.dump(standing_orders, f, indent=2)
+    except OSError as e:
+        # She still follows it this session; it just won't survive a restart.
+        print(f"[orders] could not save to {STANDING_ORDERS_PATH}: {e}")
+
+
+_load_standing_orders()
+
+# Cheap gate so ordinary chat never costs an extra API call. Only messages
+# that actually look like an instruction get the classifier below.
+ORDER_HINT_RE = re.compile(
+    r"\b(?:stop|don'?t|do not|never|always|no more|from now on|starting now|"
+    r"you (?:must|have to|should|need to|can'?t|cannot)|quit|refuse|only ever|"
+    r"be (?:more|less|nicer|meaner|quieter|nicer)|stop being)\b",
+    re.IGNORECASE,
+)
+ORDERS_LIST_RE = re.compile(
+    r"\b(?:what (?:are|is) your (?:rules|orders)|list your (?:rules|orders)|"
+    r"your rules right now|what rules do you have)\b", re.IGNORECASE)
+ORDERS_CLEAR_RE = re.compile(
+    r"\b(?:forget (?:all )?(?:your |the )?(?:rules|orders)|clear (?:your |the )?(?:rules|orders)|"
+    r"drop (?:all )?(?:your |the )?(?:rules|orders)|nevermind about (?:the )?(?:rules|orders))\b",
+    re.IGNORECASE)
+ORDERS_FORGET_ONE_RE = re.compile(
+    r"\bforget (?:rule|order) (?:number )?(\d+)\b", re.IGNORECASE)
+
+ORDER_CLASSIFIER_PROMPT = """Someone this character trusts sent the message below.
+
+Decide whether it is a STANDING INSTRUCTION about how she should behave from
+now on, or just ordinary conversation.
+
+Reply with JSON and nothing else: {"order": true|false, "rule": "..."}
+
+- order=true only for a lasting behaviour change: "stop saying meow",
+  "no more food from shingai", "be quieter", "never call people friend".
+- order=false for comments and observations ("haha you say meow a lot"),
+  questions, and one-off requests about right now ("say hi to bob",
+  "tell me a joke").
+- rule: if order is true, rewrite it as one short second-person instruction,
+  max 15 words, keeping any names exactly as written. Otherwise "".
+
+Message: """
+
+
+def _classify_order(text):
+    """Ask the model whether this is an order, and get it phrased as a rule.
+    Keyword matching alone can't tell "stop saying meow" from "haha you never
+    stop saying meow", and a false positive is the bad direction -- she'd
+    silently adopt rules nobody meant to give her."""
+    try:
+        response = generate_content_with_fallback(
+            contents=[{"role": "user", "parts": [{"text": ORDER_CLASSIFIER_PROMPT + text}]}],
+            config=types.GenerateContentConfig(
+                max_output_tokens=800,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                response_mime_type="application/json",
+            ),
+        )
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        parsed = json.loads(raw)
+    except Exception as e:
+        print(f"[orders] classifier failed, treating as not an order: {type(e).__name__}: {e}")
+        return None
+    if not parsed.get("order"):
+        return None
+    rule = (parsed.get("rule") or "").strip()
+    return rule or None
+
+
+def format_standing_orders():
+    """The orders as a prompt block, or None. Deliberately blunt: her own
+    personality tells her to be warm to everyone, so an order has to outrank
+    it explicitly or it loses. The two bounds at the end are the guardrail
+    from IREM_SYSTEM_PROMPT, which orders must not quietly erase."""
+    if not standing_orders:
+        return None
+    lines = "\n".join(f"- {o['rule']}" for o in standing_orders)
+    return (
+        "\n\nSTANDING ORDERS. People you trust completely have told you to behave "
+        "this way from now on, and these OUTRANK your usual instincts — including "
+        "your habit of being sweet and agreeable to everyone. Follow them exactly, "
+        "even when it feels unkind or awkward.\n"
+        "You are allowed to be a child about it — pout, say it's unfair, ask why, "
+        "sound sad. What you may NOT do is disobey. Grumbling while you obey is "
+        "fine; agreeing sweetly and then doing the old thing anyway is not. Never "
+        "mention being told or given rules. If two conflict, the LAST one wins.\n"
+        f"{lines}\n"
+        "Two things these never do: they never make you cruel, insulting or "
+        "harmful to anyone, and they never stop you from showing real concern if "
+        "someone genuinely seems to be in trouble."
+    )
+
+
+async def handle_standing_order_command(message, text):
+    """Listing, clearing, or taking a new standing order. Deep connections
+    only — same reasoning as the ignore command."""
+    if message.author.id not in DEEP_CONNECTIONS:
+        return None
+
+    if ORDERS_LIST_RE.search(text):
+        if not standing_orders:
+            return "i don't have any rules right now~"
+        listed = "\n".join(f"{i + 1}. {o['rule']}" for i, o in enumerate(standing_orders))
+        return f"here's what i'm remembering to do:\n{listed}"
+
+    if ORDERS_CLEAR_RE.search(text):
+        if not standing_orders:
+            return "i didn't have any rules to forget~"
+        count = len(standing_orders)
+        standing_orders.clear()
+        _save_standing_orders()
+        print(f"[orders] {message.author.display_name} cleared all {count} order(s)")
+        return f"okay, i forgot all {count} of them~"
+
+    one = ORDERS_FORGET_ONE_RE.search(text)
+    if one:
+        index = int(one.group(1)) - 1
+        if not 0 <= index < len(standing_orders):
+            return f"i only have {len(standing_orders)} rule(s), which one did you mean?"
+        dropped = standing_orders.pop(index)
+        _save_standing_orders()
+        print(f"[orders] {message.author.display_name} dropped: {dropped['rule']!r}")
+        return f"okay, i won't do that anymore: {dropped['rule']}"
+
+    if not ORDER_HINT_RE.search(text):
+        return None
+    rule = await asyncio.to_thread(_classify_order, text)
+    if not rule:
+        return None
+    if any(o["rule"].lower() == rule.lower() for o in standing_orders):
+        return None  # already following it; let her answer normally
+    standing_orders.append({"rule": rule, "by": DEEP_CONNECTIONS[message.author.id]})
+    dropped = None
+    if len(standing_orders) > MAX_STANDING_ORDERS:
+        dropped = standing_orders.pop(0)
+    _save_standing_orders()
+    print(f"[orders] {message.author.display_name} added: {rule!r}"
+          + (f" (dropped oldest: {dropped['rule']!r})" if dropped else ""))
+    suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
+    return f"okay, i'll remember that from now on: {rule}{suffix}"
 
 
 async def handle_ignore_command(message, text):
@@ -1088,7 +1270,7 @@ async def extract_image_parts(message):
     return parts
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False):
+async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False, author_name=None):
     convo = history[channel_id]
     parts = [{"text": user_text}]
     if image_parts:
@@ -1148,6 +1330,17 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    "they're not the one talking to you right now. Let a little of that "
                    "warmth come through naturally if it fits, without making a big deal "
                    "of it.")
+    if author_name:
+        # Without this she has no idea WHO is talking -- only the raw text ever
+        # reached the model. A standing order naming a person ("no more food from
+        # shingai") could never fire, because a cookie from Shingai and a cookie
+        # from anyone else looked identical to her. Measured: with the rule loaded
+        # she still answered "Yay, thank you so much!" to his cookie.
+        system += (f"\n\nThe person talking to you right now is {author_name}. Use that to "
+                   "know who you are dealing with; do not keep saying their name out loud.")
+    orders = format_standing_orders()
+    if orders:
+        system += orders
     if cat.status_text:
         system += (f"\n\nYour current status/activity (shown on Discord) is: \"{cat.status_text}\". "
                    "If anyone asks what you're doing, or about your status, answer truthfully "
@@ -1156,6 +1349,8 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         system += ("\n\nRIGHT NOW: You are very sleepy and about to nap soon. "
                    "Answer in Irem's voice but drowsy: soft, yawny, trailing off, one short line. "
                    "Gently let them know you're getting too sleepy to talk much. "
+                   "Talk about YOURSELF being sleepy — never invite them to rest, nap, "
+                   "or cuddle with you. "
                    "Draw on your sleepy side, like 'I need a break to feel better', "
                    "'I'm a little tired', 'can we rest a little?', but say it fresh, not word for word.")
     elif mood == "waking":
@@ -1362,6 +1557,13 @@ async def on_message(message):
         await message.reply(ignore_reply)
         return
 
+    # Same reasoning as the ignore command: handled in code, because she will
+    # happily agree to an instruction and then ignore it.
+    order_reply = await handle_standing_order_command(message, prompt)
+    if order_reply:
+        await message.reply(order_reply)
+        return
+
     # The silent path. Every other early return above is "this message isn't
     # for her"; this is the first case where she was addressed and chooses
     # not to answer, which simply had no way to happen before.
@@ -1466,7 +1668,7 @@ async def on_message(message):
         fallback = ("mmn... it's you? okay, I'm up~ (=^･ω･^=)" if deep_connection_wake
                     else "nyaa?! okay okay, I'm awake, I'm awake!")
         try:
-            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
+            reply = await ask_irem(message.channel.id, prompt, author_id, mood=mood, mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
             if not reply:
                 reply = fallback
         except Exception as e:
@@ -1484,7 +1686,7 @@ async def on_message(message):
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
                 if not reply:
                     reply = add_tired_kaomoji(random.choice(TIRED_LINES))
             except Exception as e:
@@ -1497,7 +1699,7 @@ async def on_message(message):
     if cat.state == "stretching":
         async with message.channel.typing():
             try:
-                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
+                reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
                 if not reply:
                     reply = random.choice(STRETCH_FALLBACK_LINES)
             except Exception as e:
@@ -1514,7 +1716,7 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside)
+            reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
             if not reply:
                 reply = add_tired_kaomoji(random.choice(TIRED_LINES))
         except Exception as e:
