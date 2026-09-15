@@ -123,12 +123,58 @@ REASONING_LEAK_RE = re.compile(
 )
 
 
+# Words from her own instructions that she never uses in character. A leak
+# rarely copies the scaffolding verbatim -- it paraphrases the per-message
+# directives. Live, 2026-09-15: "For THIS reply specifically: do NOT include
+# any kaomoji at all" came out glued to the front of her reply as "no kaomoji
+# allowed this turn. 1 short sentence. childlike, warm, agreeing to the
+# plan.ooh, good idea! ...", and REASONING_LEAK_RE above matched none of it.
+# Kept narrow on purpose: "this turn" alone is ordinary game talk, so it only
+# counts next to "allowed"/"no".
+INSTRUCTION_ECHO_RE = re.compile(
+    r"\bkaomoji\b"
+    r"|\bchildlike\b"
+    r"|\b(?:1|one|2|two)\s+short\s+(?:sentence|line|phrase)s?\b"
+    r"|\b(?:allowed|no)\s+(?:\w+\s+)?this\s+turn\b"
+    r"|\bin[- ]character\b"
+    r"|\bsystem prompt\b"
+    r"|\bstage directions?\b",
+    re.IGNORECASE,
+)
+
+
 def looks_like_reasoning(text):
     if not text:
         return False
-    if REASONING_LEAK_RE.search(text):
+    if REASONING_LEAK_RE.search(text) or INSTRUCTION_ECHO_RE.search(text):
         return True
     return text.count("\n") >= 3 or len(text) > 600
+
+
+_SENTENCE_END_RE = re.compile(r"[.!?\n]")
+
+
+def salvage_leaked_reply(text):
+    """A single-line leak is usually a PREFIX: the model states its plan, then
+    says the real line, often with no separator at all ("...agreeing to the
+    plan.ooh, good idea!"). Cut through the end of the last sentence that
+    echoes an instruction and keep what follows -- but only if what's left is
+    itself clean. Multi-line dumps aren't salvaged: in those the "real line" is
+    tangled up with several drafts, and asking another model is safer.
+    Returns None when there's nothing trustworthy to keep."""
+    if not text or "\n" in text:
+        return None
+    ends = [m.end() for m in REASONING_LEAK_RE.finditer(text)]
+    ends += [m.end() for m in INSTRUCTION_ECHO_RE.finditer(text)]
+    if not ends:
+        return None
+    boundary = _SENTENCE_END_RE.search(text, max(ends))
+    if boundary is None:
+        return None
+    rest = text[boundary.end():].strip()
+    if sum(ch.isalpha() for ch in rest) < 2 or looks_like_reasoning(rest):
+        return None
+    return rest
 
 
 def bench_last_used_model(why, seconds=600):
@@ -1494,18 +1540,28 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                 generate_content_with_fallback, contents=list(convo), config=config)
         reply = (response.text or "").strip()
         if looks_like_reasoning(reply):
-            # Never send this. Move to a different model and ask again; if the
-            # next one does it too, fall through to the canned line, which is
-            # at least in character.
-            print(f"[gemini] reasoning leaked into the reply ({len(reply)} chars), retrying: "
-                  f"{reply[:110]!r}")
+            # Never send this. Whichever model did it sits out for a while.
             bench_last_used_model("reasoning leaked into the reply")
-            response = await asyncio.to_thread(
-                generate_content_with_fallback, contents=list(convo), config=config)
-            reply = (response.text or "").strip()
-            if looks_like_reasoning(reply):
-                print("[gemini] second model leaked too, dropping the reply")
-                reply = ""
+            salvaged = salvage_leaked_reply(reply)
+            if salvaged:
+                # The real line was right there after the leak -- keep it
+                # rather than spend another request and several seconds.
+                print(f"[gemini] reasoning leaked, kept the line after it; dropped: "
+                      f"{reply[:len(reply) - len(salvaged)]!r}")
+                reply = salvaged
+            else:
+                # Nothing clean to keep. Ask a different model; if that one
+                # leaks too, fall through to the canned line, which is at
+                # least in character.
+                print(f"[gemini] reasoning leaked into the reply ({len(reply)} chars), retrying: "
+                      f"{reply[:110]!r}")
+                response = await asyncio.to_thread(
+                    generate_content_with_fallback, contents=list(convo), config=config)
+                reply = (response.text or "").strip()
+                if looks_like_reasoning(reply):
+                    reply = salvage_leaked_reply(reply) or ""
+                    if not reply:
+                        print("[gemini] second model leaked too, dropping the reply")
         if image_parts:
             # confirms whether the forced tool_config is actually making her
             # search, vs silently getting stripped by _call_model's 400
