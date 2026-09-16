@@ -1,9 +1,17 @@
 import asyncio
 import random
 import datetime
+import os
+from zoneinfo import ZoneInfo
 import discord
 
-# ---------- Sleep schedule (server local time, 24h) ----------
+# The clock everything here and in irem.py reads. Railway containers run on
+# UTC, so without pinning this her dawn/dusk activity windows sat four hours
+# away from the people actually talking to her -- "dusk" (18-21) landed at
+# 2-5pm their time. Override with IREM_TIMEZONE if the server moves.
+LOCAL_TZ = ZoneInfo(os.environ.get("IREM_TIMEZONE", "America/New_York"))
+
+# ---------- Sleep schedule (local time where her friends are, 24h) ----------
 # On Railway the server runs in UTC. To use your time, add a Railway
 # variable:  TZ = America/New_York
 #
@@ -159,7 +167,7 @@ def pick_awake_status():
 
 
 def _in_crepuscular_window():
-    hour = datetime.datetime.now().hour
+    hour = datetime.datetime.now(LOCAL_TZ).hour
     dawn_start, dawn_end = DAWN_HOURS
     dusk_start, dusk_end = DUSK_HOURS
     return dawn_start <= hour < dawn_end or dusk_start <= hour < dusk_end

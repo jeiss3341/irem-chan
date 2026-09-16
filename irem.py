@@ -17,7 +17,7 @@ from google.genai import types
 from google.genai import errors as genai_errors
 from collections import deque, defaultdict
 
-from sleepy import SleepCycle
+from sleepy import SleepCycle, LOCAL_TZ
 
 load_dotenv()
 
@@ -261,6 +261,38 @@ QUOTA_DAY_BENCH = 3600     # re-checked hourly: a wasted 429 costs ~0.2s, and
 QUOTA_MINUTE_BENCH = 60
 LOAD_BENCH = 90
 OTHER_BENCH = 3600
+def describe_now():
+    """The time of day in words, for her prompt. She had no sense of time at
+    all before this -- no idea if it was morning, whether it was late, or how
+    long anyone had been gone."""
+    now = datetime.datetime.now(LOCAL_TZ)
+    hour = now.hour
+    part = ("the middle of the night" if hour < 5 else
+            "early morning" if hour < 8 else
+            "morning" if hour < 12 else
+            "afternoon" if hour < 17 else
+            "evening" if hour < 21 else
+            "night")
+    oclock = now.strftime("%I:%M %p").lstrip("0").lower()
+    return f"{now.strftime('%A')} {part}, {oclock}"
+
+
+def describe_gap(seconds):
+    """How long since anyone talked to her here, in words a child would use."""
+    minutes = seconds / 60
+    if minutes < 55:
+        return f"about {round(minutes)} minutes"
+    hours = minutes / 60
+    if hours < 20:
+        return "about an hour" if round(hours) == 1 else f"about {round(hours)} hours"
+    days = hours / 24
+    return "about a day" if round(days) == 1 else f"about {round(days)} days"
+
+
+# When anyone last spoke to her in a given channel, so she can notice a gap
+# instead of greeting someone identically after 30 seconds and after two days.
+last_talked_at = {}
+
 history = defaultdict(lambda: deque(maxlen=50))
 
 # TEMPORARY stopgap until the real memory system exists (see docs/todo.md):
@@ -1406,6 +1438,20 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    "they're not the one talking to you right now. Let a little of that "
                    "warmth come through naturally if it fits, without making a big deal "
                    "of it.")
+    gap = None
+    previous = last_talked_at.get(channel_id)
+    if previous is not None and time.time() - previous > 1800:
+        gap = describe_gap(time.time() - previous)
+    last_talked_at[channel_id] = time.time()
+
+    system += (f"\n\nRight now it is {describe_now()} where your friends are. Use that when it "
+               "matters -- saying good morning, noticing someone is up very late, knowing "
+               "dinner time from bedtime -- but never announce the time or date unless "
+               "someone actually asks.")
+    if gap:
+        system += (f" Nobody has talked to you in here for {gap}, so this is the first thing "
+                   "said in a while.")
+
     if author_name:
         # Without this she has no idea WHO is talking -- only the raw text ever
         # reached the model. A standing order naming a person ("no more food from
