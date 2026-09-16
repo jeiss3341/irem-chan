@@ -754,6 +754,161 @@ async def _resolve_member(message, text):
     return None
 
 
+# ---------- looking things up ----------
+# She has no Google. Gemini's own search grounding is unavailable on the free
+# tier -- every one of the ten keys 429s on a grounded request, with no quota
+# detail attached, while plain requests on the same key succeed -- so lookups
+# go through Tavily instead (1,000 free searches a month, no card).
+#
+# That budget is only plenty if she reaches for it rarely, and a bot that
+# googles mid-conversation stops sounding like a person. So three gates stand
+# in front of it: a cheap regex so ordinary chat never costs anything, a
+# classifier that refuses anything about herself, the server or how she feels,
+# and a hard daily cap. Without TAVILY_API_KEY the whole path is inert.
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+TAVILY_URL = "https://api.tavily.com/search"
+SEARCH_TIMEOUT = aiohttp.ClientTimeout(total=8)
+SEARCH_DAILY_CAP = 40          # of ~33/day if the monthly 1,000 were spread evenly
+SEARCH_CHANNEL_COOLDOWN = 20   # seconds, so a burst of questions can't spiral
+MAX_SEARCH_FACTS = 3
+
+_search_day = None
+_search_spent = 0
+_last_search_at = {}
+
+# Only messages that look like they want a FACT get as far as the classifier.
+# Deliberately narrow: "what" and "?" on their own match half of ordinary chat.
+SEARCH_GATE_RE = re.compile(
+    r"\b(?:look (?:it|that|this|them) up|search (?:for|up)|google)\b"
+    r"|\b(?:latest|newest|current|most recent|this year|nowadays)\b"
+    r"|\bwho (?:is|are|was|were|won|made|owns|plays|voices)\b"
+    r"|\bwhen (?:is|was|did|does|do|will)\b"
+    r"|\bhow (?:many|much|old|long)\b"
+    r"|\bwhat (?:is|are|was|were|happened|time does)\b",
+    re.IGNORECASE,
+)
+
+SEARCH_CLASSIFIER_PROMPT = """You decide whether a Discord message needs a web
+search to answer. The bot is a cheerful cat-girl character in a small friends'
+server; she is NOT an assistant and should almost never search.
+
+Reply with JSON only: {"search": true|false, "query": "..."}
+
+search=true ONLY when all of these hold:
+- they are asking for a real-world fact about the outside world
+- it is something that changes over time or is too specific to be general
+  knowledge (a recent event, a release, a score, a price, a real public figure)
+- answering it wrong would be misleading rather than just playful
+
+search=false for ALL of these, no exceptions:
+- anything about the bot herself, her feelings, her preferences, her day
+- anything about people in this Discord server, their names or nicknames
+- opinions, jokes, teasing, roleplay, hypotheticals, compliments, greetings
+- feelings questions ("do you like me", "am i your favourite")
+- things any person simply knows (colours, animals, basic facts)
+- requests to do something rather than to know something
+
+query: if search=true, the plain search phrase, under 12 words. Otherwise "".
+
+Message: """
+
+
+def _search_budget_left():
+    """Reset the counter when the day turns, then report what's left."""
+    global _search_day, _search_spent
+    today = datetime.date.today()
+    if today != _search_day:
+        _search_day, _search_spent = today, 0
+    return SEARCH_DAILY_CAP - _search_spent
+
+
+async def tavily_search(query):
+    """Three short results, or None. Never raises -- if the lookup fails she
+    just answers without it, which is what she did before any of this."""
+    global _search_spent
+    payload = {"query": query, "max_results": MAX_SEARCH_FACTS,
+               "search_depth": "basic", "include_answer": True}
+    try:
+        async with aiohttp.ClientSession(timeout=SEARCH_TIMEOUT) as session:
+            async with session.post(TAVILY_URL, json=payload,
+                                    headers={"Authorization": f"Bearer {TAVILY_API_KEY}"}) as resp:
+                if resp.status != 200:
+                    print(f"[search] tavily HTTP {resp.status} for {query!r}")
+                    return None
+                data = await resp.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        print(f"[search] tavily failed: {type(e).__name__}: {e}")
+        return None
+    _search_spent += 1
+    facts = []
+    if data.get("answer"):
+        facts.append(str(data["answer"])[:400])
+    for result in (data.get("results") or [])[:MAX_SEARCH_FACTS]:
+        snippet = (result.get("content") or "").strip().replace("\n", " ")
+        if snippet:
+            facts.append(snippet[:300])
+    print(f"[search] {query!r} -> {len(facts)} fact(s), {_search_budget_left()} left today")
+    return facts or None
+
+
+def _classify_search(text):
+    """Whether this needs a lookup, and what to type into the search box."""
+    try:
+        response = generate_content_with_fallback(
+            contents=[{"role": "user", "parts": [{"text": SEARCH_CLASSIFIER_PROMPT + text}]}],
+            config=types.GenerateContentConfig(
+                max_output_tokens=800,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                response_mime_type="application/json",
+            ),
+        )
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        parsed = json.loads(raw)
+    except Exception as e:
+        print(f"[search] classifier failed, not searching: {type(e).__name__}: {e}")
+        return None
+    if not parsed.get("search"):
+        return None
+    query = (parsed.get("query") or "").strip()
+    return query or None
+
+
+async def maybe_search(channel_id, text):
+    """Facts to hand her for this message, or None. Every gate that can say no
+    cheaply runs before the ones that cost anything."""
+    if not TAVILY_API_KEY or not text:
+        return None
+    if not SEARCH_GATE_RE.search(text):
+        return None
+    if _search_budget_left() <= 0:
+        print("[search] daily cap reached, answering without a lookup")
+        return None
+    last = _last_search_at.get(channel_id, 0)
+    if time.time() - last < SEARCH_CHANNEL_COOLDOWN:
+        return None
+    query = await asyncio.to_thread(_classify_search, text)
+    if not query:
+        return None
+    _last_search_at[channel_id] = time.time()
+    return await tavily_search(query)
+
+
+def format_search_facts(facts):
+    """Handed to her as things she happens to know. She is told not to mention
+    looking anything up -- narrating a search breaks the character, and the
+    existing prompt already forbids it for image searches."""
+    joined = "\n".join(f"- {f}" for f in facts)
+    return (
+        "\n\nYou happen to know these things right now:\n" + joined +
+        "\nUse only the part that actually answers them, in ONE short line in your own "
+        "voice. Never mention searching, looking things up, sources, links, websites or "
+        "where you learned it -- you simply know. If none of it really answers the "
+        "question, say you don't know instead of guessing, and never read a list aloud."
+    )
+
+
 # ---------- standing orders ----------
 # Orders from jeiss/neotep that stick. She would happily SAY "okay!" to an
 # instruction and then carry on exactly as before -- measured: told "stop
@@ -1438,6 +1593,11 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    "they're not the one talking to you right now. Let a little of that "
                    "warmth come through naturally if it fits, without making a big deal "
                    "of it.")
+    if mood == "awake":
+        facts = await maybe_search(channel_id, user_text)
+        if facts:
+            system += format_search_facts(facts)
+
     gap = None
     previous = last_talked_at.get(channel_id)
     if previous is not None and time.time() - previous > 1800:
