@@ -8,8 +8,9 @@ import discord
 # The clock everything here and in irem.py reads. Railway containers run on
 # UTC, so without pinning this her dawn/dusk activity windows sat four hours
 # away from the people actually talking to her -- "dusk" (18-21) landed at
-# 2-5pm their time. Override with IREM_TIMEZONE if the server moves.
-LOCAL_TZ = ZoneInfo(os.environ.get("IREM_TIMEZONE", "America/New_York"))
+# 2-5pm their time. Central, so it tracks CST and CDT rather than drifting an
+# hour twice a year. Override with IREM_TIMEZONE.
+LOCAL_TZ = ZoneInfo(os.environ.get("IREM_TIMEZONE", "America/Chicago"))
 
 # ---------- Sleep schedule (local time where her friends are, 24h) ----------
 # On Railway the server runs in UTC. To use your time, add a Railway
