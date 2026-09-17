@@ -1255,12 +1255,23 @@ def humanize_mentions(text, message):
     return text
 
 
+# A kaomoji occasionally comes out with real words glued inside the
+# parentheses instead of a face -- live, 2026-09-16: "(o. staple.o)". The
+# model garbles its own emoticon rather than leaking reasoning, so
+# looks_like_reasoning never sees it; this is a separate, narrower net. A real
+# kaomoji is short face-punctuation, never a run of 3+ plain letters -- that's
+# an English word, not a face.
+MALFORMED_KAOMOJI_RE = re.compile(r"[(（][^)）\n]{0,40}[A-Za-z]{3,}[^)）\n]{0,40}[)）]")
+
+
 def strip_pingable_syntax(text):
     """Safety net on the way OUT: strip any raw Discord mention/channel
-    syntax she might still generate or hallucinate, and defang
-    @everyone/@here, so a reply can never actually ping anyone."""
+    syntax she might still generate or hallucinate, defang @everyone/@here so
+    a reply can never actually ping anyone, and drop a kaomoji that came out
+    with a stray real word baked into it rather than a face."""
     text = PINGABLE_SYNTAX_RE.sub("", text)
     text = re.sub(r"@(everyone|here)", r"\1", text, flags=re.IGNORECASE)
+    text = MALFORMED_KAOMOJI_RE.sub("", text).rstrip()
     return text
 
 
