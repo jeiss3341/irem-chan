@@ -530,6 +530,18 @@ DEEP_SLEEP_LINES = [
     "..zzz..",
 ]
 
+# She's still winding down, not asleep yet -- distinct from DEEP_SLEEP_LINES
+# (which read as barely conscious) and from the model-generated drowsy reply
+# (which actually engages with what was said). This is what everyone AFTER
+# the first person gets during the drowsy cooldown: no API call, just an
+# honest "I'm fading, talk to me again in a bit" instead of dead air.
+DROWSY_QUIET_LINES = [
+    "mmn... already getting sleepy, ask me again in a bit~",
+    "*yawns* my eyes are so heavy right now...",
+    "shh... just gonna rest my eyes for a sec...",
+    "mmm... too sleepy to talk much right now...",
+]
+
 # reply lines for catching her mid-stretch, right after waking up
 STRETCH_FALLBACK_LINES = [
     "*yawns* good morning...",
@@ -587,7 +599,20 @@ def add_tired_kaomoji(text):
 KAOMOJI_FORCE_CHANCE = 0.10
 KAOMOJI_ALLOW_CHANCE = 0.20
 
-DROWSY_COOLDOWN = 300  # after answering while drowsy, she ignores others for 5 min
+# DROWSY_LEAD_MINUTES in sleepy.py is 4 -- the whole drowsy phase is only 4
+# minutes long. This used to be 300 (5 min), which is LONGER than the phase
+# itself: she could only ever answer the first person to talk to her while
+# drowsy, and everyone else got total silence -- no reply, not even a tired
+# line -- until she fell fully asleep. Live, 2026-09-17: she answered Squortle
+# once at 5:25:56pm with a real drowsy line, then Squortle's own follow-up and
+# Shiori's message both landed in that silence and got nothing at all, and she
+# was fully asleep four minutes later. It read as broken; she was just asleep.
+#
+# 70s lets her give a couple of people a real drowsy reply inside the window
+# instead of just one, and DROWSY_QUIET_LINES (below) replaces the silent
+# `return` for anyone still in the cooldown -- a cheap canned line, no API
+# call, so at least SOMETHING answers rather than nothing.
+DROWSY_COOLDOWN = 70
 WAKE_PING_WINDOW = 8 * 60  # pings after the 1st must land within this many seconds of it
 
 ALLOWED_GUILD_ID = 1487104327179833375  # she only responds in this server (na norms)
@@ -1982,11 +2007,14 @@ async def on_message(message):
         await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
-    # ---- DROWSY: answers one person, then quiet for 5 minutes ----
+    # ---- DROWSY: real replies on a short cooldown, a quiet line otherwise ----
     if cat.state == "drowsy":
         now = time.time()
         if now - cat.last_drowsy_reply < DROWSY_COOLDOWN:
-            return  # she's drifting off, ignores everyone for now
+            # Still fading from the last reply -- say so cheaply rather than
+            # answering nothing at all, which is indistinguishable from broken.
+            await message.reply(strip_pingable_syntax(random.choice(DROWSY_QUIET_LINES))[:2000].lower())
+            return
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
