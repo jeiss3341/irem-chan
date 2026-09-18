@@ -627,6 +627,15 @@ DEEP_CONNECTIONS = {
     373931850218864641: "neotep",
     220690226752913418: "jeiss",
 }
+
+# Only what jeiss has actually stated (neotep is she/her, 2026-09-18). Never
+# guessed from a Discord display name or avatar -- a wrong guess misgenders a
+# real person in a way defaulting to they/them never does. Found live: asked
+# "how wide is neotep", she answered "He looks super big..." because nothing
+# told her otherwise, so an unstated pronoun defaults to they/them below.
+DEEP_CONNECTION_PRONOUNS = {
+    373931850218864641: "she/her",  # neotep
+}
 # extra name variants to catch when someone brings them up by a nickname
 # rather than their canonical name above — text-matching only, never shown
 # to the model as "her" name for them
@@ -1569,18 +1578,49 @@ async def extract_image_parts(message):
     return parts
 
 
+def attributed_turn(text, author_name):
+    """Stamp a stored turn with WHO said it. history[channel_id] is one shared
+    deque that every Discord user in the channel talks into, and a bare
+    {"role": "user", "parts": [{"text": ...}]} carries no speaker label at all --
+    across several turns from different people, Gemini has no structural way to
+    tell turn 3 wasn't the same person continuing from turn 1. Two different
+    people's messages, back to back, look in the actual API payload exactly
+    like one person's ongoing conversation. That's the shape of "confused when
+    multiple people talk to her at once" -- jeiss caught it live, 2026-09-18:
+    Squortle asked why neotep was biting him, got answered; neotep then replied
+    "I AM!!" to THAT answer, and the reply blended in an unrelated ranking
+    question Shingai had asked in between, addressed to "you two" -- three
+    different speakers folded into what looked, turn-to-turn, like one thread."""
+    return f"{author_name}: {text}" if author_name else text
+
+
 async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False, author_name=None):
     convo = history[channel_id]
-    parts = [{"text": user_text}]
+    parts = [{"text": attributed_turn(user_text, author_name)}]
     if image_parts:
         parts.extend(image_parts)
     convo.append({"role": "user", "parts": parts})
 
     system = IREM_SYSTEM_PROMPT
     if ambient_context:
-        system += (f"\n\nRecent chatter in the channel, for background context/tone only — "
-                   f"NOT directed at you, don't reply to it directly, just use it to understand "
-                   f"what's actually going on right now (a joke, a mood, a topic):\n{ambient_context}")
+        system += (f"\n\nRecent chatter in the channel — background only, for tone and mood "
+                   f"(a joke, a topic, how people are feeling):\n{ambient_context}")
+    if author_name:
+        # Placed immediately after ambient chatter, not later in the prompt where
+        # it used to sit, specifically so this instruction is adjacent to the
+        # temptation above rather than several unrelated blocks removed from it.
+        # Also why standing orders naming a person need this at all: without it
+        # she had no idea WHO was talking, only the raw text -- "no more food from
+        # shingai" could never fire, because a cookie from Shingai and a cookie
+        # from anyone else looked identical to her.
+        system += (f"\n\n{author_name} is the ONLY person you are replying to in this "
+                   "message. If the background chatter above has a question or something "
+                   "someone else said, that is not what you're answering right now — "
+                   "ignore it as something to resolve, even if it's tempting. You are "
+                   "always talking to exactly one person: never address more than one "
+                   f"at once (no \"you two\", \"you both\", \"you all\"), even if someone else's "
+                   "name comes up. Use their name to know who you're dealing with; don't "
+                   "keep saying it out loud.")
     if image_parts:
         # Deliberately short. This block was once ~490 tokens of increasingly
         # emphatic instructions not to guess at names, and it demonstrably
@@ -1622,9 +1662,13 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
                    "say it outright or make a big deal of it.")
     elif mentioned_deep_connections:
         names = [DEEP_CONNECTIONS[i] for i in mentioned_deep_connections]
+        pronouns = ", ".join(
+            f"{DEEP_CONNECTIONS[i]} ({DEEP_CONNECTION_PRONOUNS.get(i, 'they/them')})"
+            for i in mentioned_deep_connections
+        )
         who = names[0] if len(names) == 1 else " and ".join(names)
         are_is = "is" if len(names) == 1 else "are"
-        system += (f"\n\nThis message brings up {who}, who {are_is} among your deep "
+        system += (f"\n\nThis message brings up {who} ({pronouns}), who {are_is} among your deep "
                    "connections — someone you think of warmly and fondly, even though "
                    "they're not the one talking to you right now. Let a little of that "
                    "warmth come through naturally if it fits, without making a big deal "
@@ -1648,14 +1692,6 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
         system += (f" Nobody has talked to you in here for {gap}, so this is the first thing "
                    "said in a while.")
 
-    if author_name:
-        # Without this she has no idea WHO is talking -- only the raw text ever
-        # reached the model. A standing order naming a person ("no more food from
-        # shingai") could never fire, because a cookie from Shingai and a cookie
-        # from anyone else looked identical to her. Measured: with the rule loaded
-        # she still answered "Yay, thank you so much!" to his cookie.
-        system += (f"\n\nThe person talking to you right now is {author_name}. Use that to "
-                   "know who you are dealing with; do not keep saying their name out loud.")
     orders = format_standing_orders()
     if orders:
         system += orders
@@ -1772,11 +1808,11 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             if e.code != 400 or not image_parts:
                 raise
             print(f"[gemini] 400 with media attached, retrying without it: {str(e)[:140]}")
-            convo[-1] = {"role": "user", "parts": [{"text":
+            convo[-1] = {"role": "user", "parts": [{"text": attributed_turn(
                 "(a friend shared an image, GIF, or video but it wouldn't open on your side "
                 "— you did NOT receive it and cannot see it at all, so say so honestly and "
                 "maybe ask them to send it again, instead of reacting like you saw it) "
-                + user_text}]}
+                + user_text, author_name)}]}
             image_parts = None
             response = await asyncio.to_thread(
                 generate_content_with_fallback, contents=list(convo), config=config)
@@ -1836,7 +1872,7 @@ async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_dee
             # as "she got suddenly slow" days or hours later, in that channel
             # specifically. She can't re-examine old media anyway, only react
             # to it live, so keeping just the text costs nothing real.
-            convo[-1] = {"role": "user", "parts": [{"text": user_text}]}
+            convo[-1] = {"role": "user", "parts": [{"text": attributed_turn(user_text, author_name)}]}
         convo.append({"role": "model", "parts": [{"text": reply}]})
     else:
         convo.pop()
