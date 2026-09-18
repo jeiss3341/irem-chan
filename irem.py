@@ -1594,7 +1594,35 @@ def attributed_turn(text, author_name):
     return f"{author_name}: {text}" if author_name else text
 
 
-async def ask_irem(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False, author_name=None):
+# One lock per channel, created lazily. asyncio.Lock serves waiters in
+# arrival order, which is exactly the serialization a per-channel message
+# queue would give -- without writing an actual queue.
+_channel_locks = defaultdict(asyncio.Lock)
+
+
+async def ask_irem(channel_id, *args, **kwargs):
+    """Serializes every call for the same channel. Without this, two
+    messages landing in the same channel while a slow Gemini call is still
+    in flight run ask_irem CONCURRENTLY, and both append to the same
+    history[channel_id] deque with no coordination at all. Reproduced live:
+    Squortle asks a question, then (before his reply lands) Shiori sends an
+    unrelated one to the same channel -- both user turns get appended before
+    either reply does, so the stored order becomes [Squortle, Shiori,
+    reply-to-Squortle, reply-to-Shiori]. A scrambled transcript like that is
+    exactly what would confuse her on the NEXT message in that channel, even
+    with speaker names attached to each turn (see attributed_turn above) --
+    the order itself, not just who said what, is what breaks.
+
+    One lock per channel: different channels stay fully independent and
+    parallel (a busy #general and a quiet #irem-chan never wait on each
+    other), only messages IN THE SAME channel queue behind one another, in
+    the order they arrived. No extra API calls, no extra cost -- the exact
+    same work, just no longer racing itself."""
+    async with _channel_locks[channel_id]:
+        return await _ask_irem_locked(channel_id, *args, **kwargs)
+
+
+async def _ask_irem_locked(channel_id, user_text, author_id, mood="awake", mentioned_deep_connections=None, image_parts=None, ambient_context=None, emote_aside=False, author_name=None):
     convo = history[channel_id]
     parts = [{"text": attributed_turn(user_text, author_name)}]
     if image_parts:
