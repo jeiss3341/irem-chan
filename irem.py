@@ -141,7 +141,9 @@ INSTRUCTION_ECHO_RE = re.compile(
     r"|\bstage directions?\b"
     r"|\bdisobey\b"
     r"|\bobey\b"
-    r"|\bstanding orders?\b",
+    r"|\bstanding orders?\b"
+    r"|\bdeep connections?\b"
+    r"|\bbackground chatter\b",
     re.IGNORECASE,
 )
 
