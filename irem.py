@@ -138,7 +138,10 @@ INSTRUCTION_ECHO_RE = re.compile(
     r"|\b(?:allowed|no)\s+(?:\w+\s+)?this\s+turn\b"
     r"|\bin[- ]character\b"
     r"|\bsystem prompt\b"
-    r"|\bstage directions?\b",
+    r"|\bstage directions?\b"
+    r"|\bdisobey\b"
+    r"|\bobey\b"
+    r"|\bstanding orders?\b",
     re.IGNORECASE,
 )
 
@@ -667,6 +670,17 @@ UNIGNORE_CMD_RE = re.compile(
 UNIGNORE_AGAIN_RE = re.compile(
     r"\b(?:talk|reply|respond|answer)\s+to\s+(.+?)\s+again\b", re.IGNORECASE,
 )
+# "you don't need to ignore shingai" / "no need to ignore shingai" -- the
+# plain word "ignore" is right there, so IGNORE_CMD_RE matched it and started
+# a fresh mute, the exact opposite of what was said. jeiss caught this live,
+# 2026-09-18: "irem it's ok! u dont need to ignore shingai.." got "okay, i
+# won't answer Shingai for 30 minutes~". Checked before IGNORE_CMD_RE, same
+# as UNIGNORE_CMD_RE/UNIGNORE_AGAIN_RE above.
+NEGATED_IGNORE_RE = re.compile(
+    r"\b(?:(?:(?:you|u)\s+)?(?:don'?t|do\s+not)\s+(?:need|have)\s+to"
+    r"|(?:there'?s\s+)?no\s+need\s+to)\s+ignore\s+(.+)",
+    re.IGNORECASE,
+)
 # "for 10 minutes" / "for an hour" / "for 2h" / "for a day" tacked on
 IGNORE_DURATION_RE = re.compile(
     r"\bfor\s+(?:(\d+)\s*|an?\s+)?(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b",
@@ -1088,8 +1102,9 @@ async def _acknowledge_order(message, rule, dropped=None):
             f"from now on: \"{rule}\". Answer in ONE short line, in your own voice. Make it "
             "clear you understood exactly what you're not allowed to do anymore, naming the "
             "thing and the person if there is one. You can be sad, pouty, confused, or ask "
-            "why -- you're a child being scolded. Never repeat the rule word for word and "
-            "never mention rules, orders, or being told.)")
+            "why -- you're a child being scolded. Never repeat the rule word for word, "
+            "never mention rules, orders, or being told, and never use the words 'obey' "
+            "or 'disobey' -- that's not how a real kid talks.)")
     if dropped:
         note += (f" (you also forgot an older rule you used to follow: \"{dropped['rule']}\" -- "
                  "mention that briefly too.)")
@@ -1099,10 +1114,31 @@ async def _acknowledge_order(message, rule, dropped=None):
     except Exception as e:
         log_gemini_error(e)
         reply = None
-    if reply:
-        return reply
-    suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
-    return f"okay, i'll remember that from now on: {rule}{suffix}"
+    if not reply:
+        suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
+        reply = f"okay, i'll remember that from now on: {rule}{suffix}"
+    await _dm_deep_connection(message.author, reply)
+    return random.choice(GENERIC_ACK_LINES)
+
+
+GENERIC_ACK_LINES = [
+    "okay~ (｡•ᴗ•｡)",
+    "mm, got it!",
+    "okay okay!",
+    "alright~ ( ˘ᵕ˘ )",
+    "mkay!",
+]
+
+
+async def _dm_deep_connection(user, text):
+    """Send the real specifics of a command privately, since the channel
+    reply for these never names anyone or says what actually happened.
+    Silent on failure (DMs closed or blocked) -- the command already took
+    effect either way; this is only the private confirmation."""
+    try:
+        await user.send(text)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"[dm] could not message {user.display_name}: {e}")
 
 
 async def handle_standing_order_command(message, text):
@@ -1115,7 +1151,8 @@ async def handle_standing_order_command(message, text):
         if not standing_orders:
             return "i don't have any rules right now~"
         listed = "\n".join(f"{i + 1}. {o['rule']}" for i, o in enumerate(standing_orders))
-        return f"here's what i'm remembering to do:\n{listed}"
+        await _dm_deep_connection(message.author, f"here's what i'm remembering to do:\n{listed}")
+        return random.choice(GENERIC_ACK_LINES)
 
     if ORDERS_CLEAR_RE.search(text):
         if not standing_orders:
@@ -1134,7 +1171,8 @@ async def handle_standing_order_command(message, text):
         dropped = standing_orders.pop(index)
         _save_standing_orders()
         print(f"[orders] {message.author.display_name} dropped: {dropped['rule']!r}")
-        return f"okay, i won't do that anymore: {dropped['rule']}"
+        await _dm_deep_connection(message.author, f"okay, i won't do that anymore: {dropped['rule']}")
+        return random.choice(GENERIC_ACK_LINES)
 
     if not ORDER_HINT_RE.search(text):
         return None
@@ -1164,14 +1202,15 @@ async def handle_ignore_command(message, text):
     if message.author.id not in DEEP_CONNECTIONS:
         return None
 
-    unignore = UNIGNORE_CMD_RE.search(text) or UNIGNORE_AGAIN_RE.search(text)
+    unignore = UNIGNORE_CMD_RE.search(text) or UNIGNORE_AGAIN_RE.search(text) or NEGATED_IGNORE_RE.search(text)
     if unignore:
         target = await _resolve_member(message, unignore.group(1))
         if target is None:
             return None
         ignored_until.pop(target.id, None)
         print(f"[ignore] {message.author.display_name} cleared ignore on {target.display_name}")
-        return f"okay! i'll talk to {target.display_name} again~"
+        await _dm_deep_connection(message.author, f"okay! i'll talk to {target.display_name} again~")
+        return random.choice(GENERIC_ACK_LINES)
 
     ignore = IGNORE_CMD_RE.search(text)
     if ignore:
@@ -1181,7 +1220,9 @@ async def handle_ignore_command(message, text):
         seconds = _parse_ignore_duration(text)
         ignored_until[target.id] = time.time() + seconds
         print(f"[ignore] {message.author.display_name} muted {target.display_name} for {seconds}s")
-        return f"okay, i won't answer {target.display_name} for {_describe_duration(seconds)}~"
+        await _dm_deep_connection(message.author,
+            f"okay, i won't answer {target.display_name} for {_describe_duration(seconds)}~")
+        return random.choice(GENERIC_ACK_LINES)
 
     return None
 
