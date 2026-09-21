@@ -36,7 +36,7 @@ while os.environ.get(f"GEMINI_API_KEY_{i}"):
 # library quietly retried with backoff inside what looked like a single
 # attempt. An overloaded model is better abandoned for the next one than
 # waited on. Video gets longer (see ask_irem): a normal 800KB clip took 40s.
-GEMINI_CALL_TIMEOUT_MS = 30_000
+GEMINI_CALL_TIMEOUT_MS = 20_000
 GEMINI_VIDEO_TIMEOUT_MS = 90_000
 GEMINI_REPLY_DEADLINE = 75  # seconds for one reply, every attempt combined
 _gemini_clients = [
@@ -246,10 +246,18 @@ IREM_APPEARANCE = (
 #
 #   quota -- a 429 benches only THAT key's pool of that model. Quota is per
 #            key, so the same model on the next key is still worth trying.
-#   load  -- a 503 or a timeout is Google short on capacity for the MODEL,
-#            on every key at once. The rest of that model's keys are skipped
-#            rather than each hung on in turn (the old walk tried 3.7-flash on
-#            keys 1, 2, 3, 4, 5, 6 in a row, one overloaded request each).
+#   load  -- a 503, 504 or timeout benches only THAT key's pair, and the
+#            walk moves to the same model on the next key. This was briefly
+#            treated as a whole-model outage ("high demand" sounds global),
+#            which was wrong and measurably expensive: on 2026-09-21 the same
+#            request hit 3.8-flash on all ten keys back to back and four of
+#            them answered fine while six returned 503. Benching the model on
+#            one key's failure wrote off nine working keys, so she walked the
+#            entire tier list on key #1 alone and answered from
+#            gemini-3-flash-preview -- the weakest model in the rotation --
+#            while 3.8-flash sat available on keys 2, 5 and 6. Same mistake
+#            shape as assuming the daily quota was account-wide: a failure
+#            that looks global until it is actually measured per key.
 #
 # This replaces a "sticky slot" that remembered wherever the last success
 # was. That one both started each day at a single spot in a flat list (on
@@ -265,6 +273,14 @@ QUOTA_DAY_BENCH = 3600     # re-checked hourly: a wasted 429 costs ~0.2s, and
                            # it heals itself whenever Google's day rolls over
 QUOTA_MINUTE_BENCH = 60
 LOAD_BENCH = 90
+# A failure that comes back FAST is that key's shard being busy -- other keys
+# are usually fine, so the walk should try them. A failure that HANGS first is
+# the model itself congested, and walking nine more keys just buys nine more
+# hangs. Measured 2026-09-21, both shapes in one session: ten 3.8-flash keys
+# rejected in 0.2-0.8s each (cheap to walk, and key #2 answered), while later
+# three 3.6-flash keys hung 18.5s, 19.6s and 19.6s before failing -- that walk
+# cost 70.8s for one reply. Healthy calls land in 1-5s, so 6s splits them.
+SLOW_FAIL_SECONDS = 6
 OTHER_BENCH = 3600
 def describe_now():
     """The time of day in words, for her prompt. She had no sense of time at
@@ -445,8 +461,13 @@ def generate_content_with_fallback(**kwargs):
                     _pair_benched_until[(model, key)] = time.time() + bench
                     why = "quota (per day)" if bench == QUOTA_DAY_BENCH else "quota (per minute)"
                 elif e.code >= 500:
-                    _model_benched_until[model] = time.time() + LOAD_BENCH
-                    why = f"overloaded, skipping {model} on every key for {LOAD_BENCH}s"
+                    if took >= SLOW_FAIL_SECONDS:
+                        _model_benched_until[model] = time.time() + LOAD_BENCH
+                        why = (f"hung {took:.0f}s before failing -- model is congested, "
+                               f"skipping {model} on every key for {LOAD_BENCH}s")
+                    else:
+                        _pair_benched_until[(model, key)] = time.time() + LOAD_BENCH
+                        why = f"overloaded on this key, benched {LOAD_BENCH}s"
                 else:
                     _pair_benched_until[(model, key)] = time.time() + OTHER_BENCH
                     why = f"{e.code}"
@@ -454,10 +475,11 @@ def generate_content_with_fallback(**kwargs):
                 continue
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 last_error = e
+                # A timeout is by definition a slow failure: congested model.
                 _model_benched_until[model] = time.time() + LOAD_BENCH
                 print(f"[gemini] {model} on key #{key + 1} {type(e).__name__} after "
-                      f"{time.monotonic() - attempt_started:.1f}s, skipping it on every key "
-                      f"for {LOAD_BENCH}s")
+                      f"{time.monotonic() - attempt_started:.1f}s, skipping it on every "
+                      f"key for {LOAD_BENCH}s")
                 continue
             _last_used = (model, key)
             if attempts > 1 or time.monotonic() - started > 10:
@@ -1810,19 +1832,17 @@ async def _ask_irem_locked(channel_id, user_text, author_id, mood="awake", menti
     else:
         system += "\n\nFor THIS reply specifically: do NOT include any kaomoji at all, no matter what."
 
-    # Search grounding is forced ONLY when there's media AND someone is
-    # actually asking her to identify it. Grounding draws on its own small
-    # budget, separate from the model quotas, and forcing it on every single
-    # image spends a grounded query on "look at my cat" where there is
-    # nothing to look up -- which is exactly how it got drained to the point
-    # that every media reply started failing. Gating on the question means
-    # the budget goes to the messages that actually need a search.
-    #
-    # Forcing (tool_config) rather than merely offering the tool is
-    # deliberate: given the option, she skips searching and answers from her
-    # own "knowledge", including her character bio, which is how a wrong
-    # guess like "Wuthering Waves" leaks in. If a model rejects the forcing,
-    # or grounding itself is out of budget, _call_model degrades gracefully.
+    # Search grounding is switched OFF. Measured 2026-09-16: a grounded
+    # request 429s on all ten keys, with no quota detail attached, while a
+    # plain request on the same key and model succeeds -- free-tier accounts
+    # get no real grounding allowance, so rotating keys cannot help. Leaving
+    # it attached cost a guaranteed-failing round trip on every identify-style
+    # media message, visible in the logs as a "429 with tools set, retrying
+    # without it" line before each real attempt (three of them in one reply on
+    # 2026-09-21). Web lookups go through Tavily now (see maybe_search), which
+    # makes this path redundant as well as broken. To re-enable on a paid
+    # tier, attach types.Tool(google_search=...) here gated on
+    # IDENTIFY_REQUEST_RE, as before.
     #
     # Thinking stays OFF, including for media. Dynamic thinking (-1) was
     # tried here and actively broke media replies: measured on a real image,
@@ -1836,13 +1856,6 @@ async def _ask_irem_locked(channel_id, user_text, author_id, mood="awake", menti
     tools = None
     tool_config = None
     thinking_budget = 0
-    if image_parts:
-        if IDENTIFY_REQUEST_RE.search(user_text):
-            tools = [types.Tool(google_search=types.GoogleSearch())]
-            tool_config = types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(mode="ANY")
-            )
-
     # If this call fails (rate limit, API error, etc.) or comes back empty, the
     # caller falls back to a canned line — but the user turn appended above
     # already sits in `convo`. Left in place with no model turn after it, the
