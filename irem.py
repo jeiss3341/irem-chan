@@ -281,6 +281,15 @@ LOAD_BENCH = 90
 # three 3.6-flash keys hung 18.5s, 19.6s and 19.6s before failing -- that walk
 # cost 70.8s for one reply. Healthy calls land in 1-5s, so 6s splits them.
 SLOW_FAIL_SECONDS = 6
+# How many keys in a row may fail on load before the model is written off for
+# this sweep. One 503 is that key's shard; three in a row means the model is
+# down broadly and the remaining keys are just latency. Measured 2026-09-22
+# during a real Gemini outage: 3.8-flash returned 503 on every key tested
+# while 3.6-flash answered on every key in 1.3-3.0s -- but the walk spent ~30s
+# failing through twenty 3.8 and 3.7 keys before reaching it. Three strikes
+# gets there in ~5s. Load failures only; a quota 429 really is per key and
+# says nothing about the next one.
+MODEL_STRIKE_LIMIT = 3
 OTHER_BENCH = 3600
 def describe_now():
     """The time of day in words, for her prompt. She had no sense of time at
@@ -429,6 +438,7 @@ def generate_content_with_fallback(**kwargs):
     started = time.monotonic()
     last_error = None
     attempts = 0
+    load_strikes = {}  # model -> consecutive load failures in THIS sweep
     for ignore_load in (False, True):
         # Second pass only if the first found nothing to try at all: load
         # benches are guesses about a transient state, quota benches aren't.
@@ -461,10 +471,15 @@ def generate_content_with_fallback(**kwargs):
                     _pair_benched_until[(model, key)] = time.time() + bench
                     why = "quota (per day)" if bench == QUOTA_DAY_BENCH else "quota (per minute)"
                 elif e.code >= 500:
+                    load_strikes[model] = load_strikes.get(model, 0) + 1
                     if took >= SLOW_FAIL_SECONDS:
                         _model_benched_until[model] = time.time() + LOAD_BENCH
                         why = (f"hung {took:.0f}s before failing -- model is congested, "
                                f"skipping {model} on every key for {LOAD_BENCH}s")
+                    elif load_strikes[model] >= MODEL_STRIKE_LIMIT:
+                        _model_benched_until[model] = time.time() + LOAD_BENCH
+                        why = (f"{load_strikes[model]} keys in a row failed -- {model} is down "
+                               f"broadly, skipping it on every key for {LOAD_BENCH}s")
                     else:
                         _pair_benched_until[(model, key)] = time.time() + LOAD_BENCH
                         why = f"overloaded on this key, benched {LOAD_BENCH}s"
@@ -481,6 +496,7 @@ def generate_content_with_fallback(**kwargs):
                       f"{time.monotonic() - attempt_started:.1f}s, skipping it on every "
                       f"key for {LOAD_BENCH}s")
                 continue
+            load_strikes[model] = 0
             _last_used = (model, key)
             if attempts > 1 or time.monotonic() - started > 10:
                 print(f"[gemini] answered by {model} key #{key + 1} on attempt {attempts} "
@@ -1142,7 +1158,27 @@ async def _acknowledge_order(message, rule, dropped=None):
         suffix = f" (i forgot the oldest one: {dropped['rule']})" if dropped else ""
         reply = f"okay, i'll remember that from now on: {rule}{suffix}"
     await _dm_deep_connection(message.author, reply)
-    return random.choice(GENERIC_ACK_LINES)
+    return pick_line(GENERIC_ACK_LINES)
+
+
+# random.choice, but never the same line twice running from one pool.
+# TIRED_LINES has three entries, so a plain choice repeats about a third of
+# the time, and a canned fallback repeating VERBATIM is exactly what makes a
+# failure read as a broken bot rather than a sleepy cat. Live, 2026-09-22:
+# neotep got "i'm sleepy... can we rest a little? i'll be here when you come
+# back." twice in a row and said so immediately ("she hit me w the same
+# voiceline"). Keyed by id() because these pools are module-level constants
+# that live for the whole process.
+_last_canned = {}
+
+
+def pick_line(pool):
+    if len(pool) < 2:
+        return pool[0]
+    fresh = [line for line in pool if line != _last_canned.get(id(pool))]
+    choice = random.choice(fresh or list(pool))
+    _last_canned[id(pool)] = choice
+    return choice
 
 
 GENERIC_ACK_LINES = [
@@ -1176,7 +1212,7 @@ async def handle_standing_order_command(message, text):
             return "i don't have any rules right now~"
         listed = "\n".join(f"{i + 1}. {o['rule']}" for i, o in enumerate(standing_orders))
         await _dm_deep_connection(message.author, f"here's what i'm remembering to do:\n{listed}")
-        return random.choice(GENERIC_ACK_LINES)
+        return pick_line(GENERIC_ACK_LINES)
 
     if ORDERS_CLEAR_RE.search(text):
         if not standing_orders:
@@ -1196,7 +1232,7 @@ async def handle_standing_order_command(message, text):
         _save_standing_orders()
         print(f"[orders] {message.author.display_name} dropped: {dropped['rule']!r}")
         await _dm_deep_connection(message.author, f"okay, i won't do that anymore: {dropped['rule']}")
-        return random.choice(GENERIC_ACK_LINES)
+        return pick_line(GENERIC_ACK_LINES)
 
     if not ORDER_HINT_RE.search(text):
         return None
@@ -1234,7 +1270,7 @@ async def handle_ignore_command(message, text):
         ignored_until.pop(target.id, None)
         print(f"[ignore] {message.author.display_name} cleared ignore on {target.display_name}")
         await _dm_deep_connection(message.author, f"okay! i'll talk to {target.display_name} again~")
-        return random.choice(GENERIC_ACK_LINES)
+        return pick_line(GENERIC_ACK_LINES)
 
     ignore = IGNORE_CMD_RE.search(text)
     if ignore:
@@ -1246,7 +1282,7 @@ async def handle_ignore_command(message, text):
         print(f"[ignore] {message.author.display_name} muted {target.display_name} for {seconds}s")
         await _dm_deep_connection(message.author,
             f"okay, i won't answer {target.display_name} for {_describe_duration(seconds)}~")
-        return random.choice(GENERIC_ACK_LINES)
+        return pick_line(GENERIC_ACK_LINES)
 
     return None
 
@@ -2089,10 +2125,10 @@ async def on_message(message):
                 if count < 3:
                     cat.per_person_wake_pings[author_id] = (first_at, count)
                     if count == 1:
-                        await message.channel.send(random.choice(DEEP_SLEEP_LINES))
+                        await message.channel.send(pick_line(DEEP_SLEEP_LINES))
                     else:
                         await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
-                        await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
+                        await message.channel.send(add_tired_kaomoji(pick_line(MUMBLE_LINES)).lower())
                     return
             else:
                 # napping: any combination of 3 pings wakes her
@@ -2105,7 +2141,7 @@ async def on_message(message):
                 if count < 3:
                     cat.wake_ping_progress = (first_at, count)
                     await cat._set("asleep", discord.Status.idle)  # stirring, not awake yet
-                    await message.channel.send(add_tired_kaomoji(random.choice(MUMBLE_LINES)).lower())
+                    await message.channel.send(add_tired_kaomoji(pick_line(MUMBLE_LINES)).lower())
                     return
 
         # she's waking up now — either the deep-connections override, or a
@@ -2133,17 +2169,17 @@ async def on_message(message):
         if now - cat.last_drowsy_reply < DROWSY_COOLDOWN:
             # Still fading from the last reply -- say so cheaply rather than
             # answering nothing at all, which is indistinguishable from broken.
-            await message.reply(strip_pingable_syntax(random.choice(DROWSY_QUIET_LINES))[:2000].lower())
+            await message.reply(strip_pingable_syntax(pick_line(DROWSY_QUIET_LINES))[:2000].lower())
             return
         cat.last_drowsy_reply = now
         async with message.channel.typing():
             try:
                 reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="drowsy", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
                 if not reply:
-                    reply = add_tired_kaomoji(random.choice(TIRED_LINES))
+                    reply = add_tired_kaomoji(pick_line(TIRED_LINES))
             except Exception as e:
                 log_gemini_error(e)
-                reply = add_tired_kaomoji(random.choice(TIRED_LINES))
+                reply = add_tired_kaomoji(pick_line(TIRED_LINES))
         await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
@@ -2153,10 +2189,10 @@ async def on_message(message):
             try:
                 reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="stretching", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
                 if not reply:
-                    reply = random.choice(STRETCH_FALLBACK_LINES)
+                    reply = pick_line(STRETCH_FALLBACK_LINES)
             except Exception as e:
                 log_gemini_error(e)
-                reply = random.choice(STRETCH_FALLBACK_LINES)
+                reply = pick_line(STRETCH_FALLBACK_LINES)
         await message.reply(strip_pingable_syntax(reply)[:2000].lower())
         return
 
@@ -2170,10 +2206,10 @@ async def on_message(message):
         try:
             reply = await ask_irem(message.channel.id, prompt, message.author.id, mood="awake", mentioned_deep_connections=dc_mentioned, image_parts=image_parts, ambient_context=ambient_ctx, emote_aside=emote_aside, author_name=message.author.display_name)
             if not reply:
-                reply = add_tired_kaomoji(random.choice(TIRED_LINES))
+                reply = add_tired_kaomoji(pick_line(TIRED_LINES))
         except Exception as e:
             log_gemini_error(e)
-            reply = add_tired_kaomoji(random.choice(TIRED_LINES))
+            reply = add_tired_kaomoji(pick_line(TIRED_LINES))
 
     await message.reply(strip_pingable_syntax(reply)[:2000].lower())
 
