@@ -290,6 +290,24 @@ SLOW_FAIL_SECONDS = 6
 # gets there in ~5s. Load failures only; a quota 429 really is per key and
 # says nothing about the next one.
 MODEL_STRIKE_LIMIT = 3
+# A model benched again right after its bench expired gets benched longer each
+# time: 90s, 3m, 6m, capped at 10m. Without this she re-pays the whole
+# discovery cost every 90s for as long as an outage lasts -- simulated over a
+# ten-minute outage with 3.8 and 3.7 down, that was 30 wasted calls, six on
+# every other message, each one a multi-second 503. The cap keeps recovery
+# quick: when Google comes back she notices within ten minutes and the level
+# resets to zero on the first success.
+MODEL_BENCH_MAX = 600
+_model_bench_level = {}
+
+
+def bench_model(model):
+    """Bench a model with escalating backoff, and return how long for."""
+    level = _model_bench_level.get(model, 0)
+    seconds = min(LOAD_BENCH * (2 ** level), MODEL_BENCH_MAX)
+    _model_benched_until[model] = time.time() + seconds
+    _model_bench_level[model] = level + 1
+    return seconds
 OTHER_BENCH = 3600
 def describe_now():
     """The time of day in words, for her prompt. She had no sense of time at
@@ -473,13 +491,13 @@ def generate_content_with_fallback(**kwargs):
                 elif e.code >= 500:
                     load_strikes[model] = load_strikes.get(model, 0) + 1
                     if took >= SLOW_FAIL_SECONDS:
-                        _model_benched_until[model] = time.time() + LOAD_BENCH
+                        benched = bench_model(model)
                         why = (f"hung {took:.0f}s before failing -- model is congested, "
-                               f"skipping {model} on every key for {LOAD_BENCH}s")
+                               f"skipping {model} on every key for {benched}s")
                     elif load_strikes[model] >= MODEL_STRIKE_LIMIT:
-                        _model_benched_until[model] = time.time() + LOAD_BENCH
+                        benched = bench_model(model)
                         why = (f"{load_strikes[model]} keys in a row failed -- {model} is down "
-                               f"broadly, skipping it on every key for {LOAD_BENCH}s")
+                               f"broadly, skipping it on every key for {benched}s")
                     else:
                         _pair_benched_until[(model, key)] = time.time() + LOAD_BENCH
                         why = f"overloaded on this key, benched {LOAD_BENCH}s"
@@ -491,12 +509,13 @@ def generate_content_with_fallback(**kwargs):
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 last_error = e
                 # A timeout is by definition a slow failure: congested model.
-                _model_benched_until[model] = time.time() + LOAD_BENCH
+                benched = bench_model(model)
                 print(f"[gemini] {model} on key #{key + 1} {type(e).__name__} after "
                       f"{time.monotonic() - attempt_started:.1f}s, skipping it on every "
-                      f"key for {LOAD_BENCH}s")
+                      f"key for {benched}s")
                 continue
             load_strikes[model] = 0
+            _model_bench_level.pop(model, None)  # it works again; start fresh
             _last_used = (model, key)
             if attempts > 1 or time.monotonic() - started > 10:
                 print(f"[gemini] answered by {model} key #{key + 1} on attempt {attempts} "
