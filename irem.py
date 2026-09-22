@@ -298,6 +298,15 @@ MODEL_STRIKE_LIMIT = 3
 # quick: when Google comes back she notices within ten minutes and the level
 # resets to zero on the first success.
 MODEL_BENCH_MAX = 600
+# Hard ceiling on API calls for ONE reply, whatever is failing. Without it a
+# total outage sweeps all 70 (model, key) pairs -- and since a sweep that size
+# burns the per-minute limit on every key it touches, the sweep itself is what
+# turns "Gemini is busy" into "every key is rate limited", which is exactly
+# the 2026-09-22 log: 70 attempts, then "every Gemini model/key is benched".
+# The strike rule only counts server errors, so it does nothing for an
+# all-429 sweep; this catches every failure kind. 12 is ~4 models x 3 keys,
+# plenty to find a live one when anything is alive at all.
+MAX_ATTEMPTS_PER_REPLY = 12
 _model_bench_level = {}
 
 
@@ -472,6 +481,10 @@ def generate_content_with_fallback(**kwargs):
                 print(f"[gemini] giving up after {attempts} attempt(s), "
                       f"{time.monotonic() - started:.1f}s: past the reply deadline")
                 raise last_error or TimeoutError("Gemini reply deadline passed")
+            if attempts >= MAX_ATTEMPTS_PER_REPLY:
+                print(f"[gemini] giving up after {attempts} attempt(s), "
+                      f"{time.monotonic() - started:.1f}s: attempt cap reached")
+                raise last_error or RuntimeError("Gemini attempt cap reached")
             attempts += 1
             attempt_started = time.monotonic()
             try:
