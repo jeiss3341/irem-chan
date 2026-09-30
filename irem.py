@@ -409,6 +409,16 @@ def _degrade_for_error(config, code, already_tried):
     return None, None
 
 
+# Which config fields a model has already rejected with a 400. Learned at
+# runtime rather than hardcoded, so it can't go stale when Google changes
+# what a model accepts -- but remembered, so the lesson is paid for once per
+# process instead of on every call. Without this, "gemini-3.5-flash-lite:
+# 400 with thinking_config set, retrying without it" appeared on literally
+# every call to that model (four times in one stretch of the 2026-09-30
+# log), each one a wasted round trip before the real request.
+_rejected_fields = defaultdict(set)
+
+
 def _call_model(client, model, kwargs):
     """generate_content, but rather than losing a slot to a failure that's
     really about one optional config field, drops that field and retries in
@@ -416,7 +426,13 @@ def _call_model(client, model, kwargs):
     actually complains about instead of a hardcoded per-model list that
     could go stale."""
     attempt_kwargs = kwargs
-    tried = set()
+    tried = set(_rejected_fields[model])
+    config = attempt_kwargs.get("config")
+    if config is not None and tried:
+        # Skip straight to the form this model is known to accept.
+        known = {f: None for f in tried if getattr(config, f, None) is not None}
+        if known:
+            attempt_kwargs = {**attempt_kwargs, "config": config.model_copy(update=known)}
     for _ in range(3):  # at most one retry per strippable field
         try:
             return client.models.generate_content(model=model, **attempt_kwargs)
@@ -428,6 +444,10 @@ def _call_model(client, model, kwargs):
             if field is None:
                 raise
             tried.add(field)
+            if e.code == 400:
+                # A 400 on an optional field is a permanent property of the
+                # model, not a transient failure -- remember it.
+                _rejected_fields[model].add(field)
             print(f"[gemini] {model}: {e.code} with {field} set, retrying without it")
             attempt_kwargs = {**attempt_kwargs, "config": weaker}
     return client.models.generate_content(model=model, **attempt_kwargs)
