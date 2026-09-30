@@ -189,16 +189,28 @@ class SleepCycle:
         self.is_deep_sleep = False    # current/most recent sleep session type — lighter naps wake in fewer pings
 
     async def _set(self, state, status, activity_text=None):
+        # State first, network second: change_presence is a real network call
+        # and it WILL fail sometimes (it is attempted right through gateway
+        # reconnects, which happen every 30-60 minutes in production). An
+        # unhandled failure here used to propagate out of run() and kill the
+        # whole sleep cycle task silently, freezing her in whatever state she
+        # was in -- if that was "asleep", asleep forever, with no log line
+        # saying so. Her actual state is what matters; the Discord badge is
+        # cosmetic and can miss an update.
         self.state = state
         self.status_text = activity_text
         print(f"[sleep] -> {state}")
-        if activity_text:
-            await self.client.change_presence(
-                status=status,
-                activity=discord.CustomActivity(name=activity_text),
-            )
-        else:
-            await self.client.change_presence(status=status)
+        try:
+            if activity_text:
+                await self.client.change_presence(
+                    status=status,
+                    activity=discord.CustomActivity(name=activity_text),
+                )
+            else:
+                await self.client.change_presence(status=status)
+        except (discord.HTTPException, discord.ConnectionClosed, OSError) as e:
+            print(f"[sleep] presence update failed ({type(e).__name__}: {e}); "
+                  f"state is still {state}")
 
     async def _shuffle_awake_status(self):
         """Every few hours, if she's awake, give her a fresh little status."""
@@ -247,6 +259,7 @@ class SleepCycle:
         await self._set("awake", discord.Status.online, pick_awake_status())
 
         while not self.client.is_closed():
+          try:
             # pick a fresh daily sleep target (not tied to calendar midnight —
             # crepuscular timing is read from the real clock each time, so this
             # cycle can run longer or shorter than 24h without drifting wrong)
@@ -281,3 +294,15 @@ class SleepCycle:
                 # ----- WAKE UP (stretch, then awake) -----
                 await self._wake_up()
             # today's sleep target is used up; loop back and pick a fresh one
+          except asyncio.CancelledError:
+            raise
+          except Exception as e:
+            # Never let one bad cycle end the loop -- that is what "she is
+            # permanently asleep" looks like from Discord. Log it loudly,
+            # put her back awake so she is at least reachable, and continue.
+            print(f"[sleep] !! cycle error ({type(e).__name__}: {e}) -- recovering")
+            try:
+                await self._set("awake", discord.Status.online, pick_awake_status())
+            except Exception:
+                self.state = "awake"
+            await asyncio.sleep(30)

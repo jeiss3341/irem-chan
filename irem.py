@@ -1356,6 +1356,30 @@ client = discord.Client(intents=intents)
 cat = SleepCycle(client)
 
 
+def _spawn_sleep_cycle():
+    """Start the sleep cycle and WATCH it. An asyncio task that raises has its
+    exception swallowed unless someone retrieves it, so before this the cycle
+    could die on a transient Discord error and leave her frozen -- permanently
+    asleep, with nothing in the logs saying why. The callback makes that
+    impossible to miss and brings her back."""
+    task = client.loop.create_task(cat.run())
+
+    def restarted(finished):
+        if finished.cancelled():
+            return
+        error = finished.exception()
+        print(f"[sleep] !! sleep cycle STOPPED ({error!r}) -- restarting in 10s")
+        cat.state = "awake"  # reachable while it comes back up
+
+        async def again():
+            await asyncio.sleep(10)
+            _spawn_sleep_cycle()
+
+        client.loop.create_task(again())
+
+    task.add_done_callback(restarted)
+
+
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
@@ -1363,7 +1387,7 @@ async def on_ready():
     # sleep-cycle loop racing the first one
     if not cat.started:
         cat.started = True
-        client.loop.create_task(cat.run())
+        _spawn_sleep_cycle()
     # catches any server she was already in (e.g. added before this guard
     # existed) as soon as she comes online, not just newly-attempted joins
     for guild in client.guilds:
